@@ -13,6 +13,9 @@ export const RNG_INDEX_DISPERSION_WAVELENGTH = 7;
 // Eight dimensions are reserved, which is the depth the kernel loop walks.
 export const RNG_INDEX_MIX_SHADER = 8;
 export const RNG_INDEX_MIX_SHADER_COUNT = 8;
+// Subsurface: the draw that decides whether a hit goes into the volume. It is the same
+// kind of choice as the mix — one closure among the others — so it sits right after.
+export const RNG_INDEX_SUBSURFACE = 16;
 export const RNG_INDEX_ALPHA_TEST = 50;
 import { contextProxyFn } from 'three-mesh-bvh/webgpu';
 import * as sobol from './rand/sobol.wgsl.js';

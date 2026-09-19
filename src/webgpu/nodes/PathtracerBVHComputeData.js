@@ -900,7 +900,9 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			floatArray[ index ++ ] = mixIndex < 0 ? 0.0 : getField( m, 'mixWeight', 0.0 );
 			intArray[ index ++ ] = Math.max( 0, mixIndex );
 			intArray[ index ++ ] = getTexture( m, 'mixMap' );
-			floatArray[ index ++ ] = 0.0;
+
+			// Subsurface - offset 279
+			floatArray[ index ++ ] = getField( m, 'subsurfaceWeight', 0.0 );
 
 		}
 

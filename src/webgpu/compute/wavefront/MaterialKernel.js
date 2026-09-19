@@ -3,7 +3,7 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT } from '../../nodes/random.wgsl.js';
+import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc } from '../../nodes/material.wgsl.js';
@@ -154,6 +154,8 @@ export class MaterialKernel extends ComputeKernel {
 					rayDataStorage[ index ].maxDist = ray.maxDist;
 					rayDataStorage[ index ].rayIntersectionIndex = i32( rayIndex );
 					rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+					// a camera ray starts OUTSIDE every medium
+					rayDataStorage[ index ].insideMaterial = - 1;
 					rayDataStorage[ index ].dispersionWavelength = - mix( ${ DISPERSION_MIN_WAVELENGTH }.0, ${ DISPERSION_MAX_WAVELENGTH }.0, ${ rand1 }( ${ RNG_INDEX_DISPERSION_WAVELENGTH } ) );
 
 					// write the active params & dispatched flag
@@ -223,13 +225,39 @@ export class MaterialKernel extends ComputeKernel {
 
 					vertexData.position = objectInfo.matrixWorld * vertexData.position;
 
-					let view = - input.direction;
+					// ── SUBSURFACE: the exit is a NEW diffuse point, not the hit it arrived at ──
+					//
+					// A path travelling inside the volume meets the wall from behind, and that is
+					// where the light leaves. Shading it as an ordinary hit does not work: the
+					// normal faces inward, so the sampled lobe bounces back into the volume and
+					// NEE toward a light that is OUTSIDE has a zero pdf. Measured: the shadowed
+					// face stayed at 0.08 even with the weight forced to 1 in the kernel.
+					//
+					// Cycles solves the same thing in bssrdf_setup - the exit point does not
+					// inherit the hit, it is rebuilt as if the light had arrived straight down
+					// the OUTWARD normal (sd->wi = sd->N). Everything downstream - sampling, NEE,
+					// shadow rays - is then the usual path.
+					var hitNormal = input.normal;
+					var hitSide = input.side;
+					var view = - input.direction;
+					if ( input.insideMaterial >= 0 ) {
+
+						// "input.normal" always faces the incoming ray, so on the way out it points
+						// INTO the volume: the geometric one is input.normal * input.side, and it is
+						// passed as though the hit came from outside (side = +1). Flipping only the
+						// side looks like it works and does not: with smooth shading the vertex
+						// normal puts it right by accident, with flat shading it does not.
+						hitNormal = input.normal * input.side;
+						hitSide = 1.0;
+						view = hitNormal;
+
+					}
 
 					// blur glossy surfaces after low-probability bounces to suppress fireflies,
 					// from the Cycles "filter glossy" approach in integrator/surface_shader.h
 					let blurRoughness = sqrt( clamp( 1.0 - filterGlossy * input.minPdf, 0.0, 1.0 ) ) * 0.5;
 
-					var surface = ${ getSurfaceRecordFn }( materialInfo, vertexData, input.side, input.normal, view, blurRoughness );
+					var surface = ${ getSurfaceRecordFn }( materialInfo, vertexData, hitSide, hitNormal, view, blurRoughness );
 
 					// Stochastically pass through partially transparent surfaces by re-enqueueing
 					// the ray at the hit point, advancing the alpha depth but not the bounce count.
@@ -302,6 +330,38 @@ export class MaterialKernel extends ComputeKernel {
 
 					// sample the next bounce direction and stage the scatter state for LogicKernel
 					var scatterRec = ${ bsdfSampleFn }( view, surface );
+
+					// ── SUBSURFACE: go IN, and come back OUT ──
+					//
+					// Entering is a closure pick, the same shape as the mix above: with
+					// probability "subsurfaceWeight" the hit does not scatter off the surface,
+					// it crosses it and the path continues INSIDE the volume. The next time
+					// that path meets a surface it leaves, and that exit point is where the
+					// light appears to come out — which is the whole phenomenon: light that
+					// goes in here and leaves over there.
+					//
+					// The direction is MIRRORED through the surface plane rather than sampled
+					// again: a cosine lobe around the normal becomes a cosine lobe around the
+					// opposite normal, with the same pdf. One reflection instead of a second
+					// basis and a second pair of random numbers.
+					var insideNext = input.insideMaterial;
+					if ( input.insideMaterial >= 0 ) {
+
+						// the path was travelling inside and has reached the surface: it leaves.
+						// The sampled direction already points outward, because the surface above
+						// was rebuilt with the OUTWARD normal.
+						insideNext = - 1;
+
+					} else if ( materialInfo.subsurfaceWeight > 0.0
+						&& ${ rand1 }( ${ RNG_INDEX_SUBSURFACE } ) < materialInfo.subsurfaceWeight ) {
+
+						let faceNormal = input.normal * input.side;
+						scatterRec.direction = scatterRec.direction - 2.0 * dot( scatterRec.direction, faceNormal ) * faceNormal;
+						insideNext = i32( objectInfo.materialIndex );
+
+					}
+					rayDataStorage[ index ].insideMaterial = insideNext;
+
 					let newBounce = input.currentBounce + 1u;
 
 					// decide termination now so finished paths skip the bounce trace entirely - a

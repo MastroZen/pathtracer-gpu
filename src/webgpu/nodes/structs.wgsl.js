@@ -169,8 +169,10 @@ export const materialStruct = new StructTypeNode( {
 	// it, unlike the other maps — a baked mask has no offset or repeat, and a mat3 per
 	// material to carry an identity is twelve floats each.
 	mixMap: 'int',
-	// The one left is where a subsurface record will start.
-	_mixAlignment1: 'float',
+	// Subsurface: how often a hit goes INTO the volume instead of scattering off the
+	// surface. It is a closure among the others, picked the same way the mix is — which
+	// is what Cycles does, and the reason this sits next to the mix fields.
+	subsurfaceWeight: 'float',
 	// total size = 280
 }, 'Material' );
 

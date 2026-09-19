@@ -86,6 +86,11 @@ export const rayDataStruct = new StructTypeNode( {
 	// first dispersive interaction
 	dispersionWavelength: 'float',
 
+	// Subsurface: the material the path is currently travelling INSIDE, or -1 outside.
+	// The medium is otherwise only implied — the transmission attenuation infers it from the
+	// side of the exit hit — and a walk through the volume needs to know it before the exit.
+	insideMaterial: 'int',
+
 }, 'RayData' );
 
 // A ray queued for BVH traversal by the trace kernels. A "maxDist" of zero traces unbounded.
