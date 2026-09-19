@@ -28,6 +28,7 @@ export class MaterialKernel extends ComputeKernel {
 			filterGlossy: uniform( 1 ),
 			maxTransparentBounces: uniform( 5, 'uint' ),
 			maxBounces: uniform( 5, 'uint' ),
+			maxSubsurfaceSteps: uniform( SUBSURFACE_MAX_STEPS, 'uint' ),
 
 			sampleCountTarget: textureStore( new StorageTexture( 1, 1 ) ).toReadWrite(),
 
@@ -56,6 +57,7 @@ export class MaterialKernel extends ComputeKernel {
 				filterGlossy: f32,
 				maxTransparentBounces: u32,
 				maxBounces: u32,
+				maxSubsurfaceSteps: u32,
 
 				globalId: vec3u
 			) -> void {
@@ -200,7 +202,7 @@ export class MaterialKernel extends ComputeKernel {
 
 								// out of steps: the path is dropped where it stands rather than let out
 								// somewhere arbitrary. It loses its energy, and that is the truncation.
-								if ( input.subsurfaceSteps >= ${ SUBSURFACE_MAX_STEPS }u ) {
+								if ( input.subsurfaceSteps >= maxSubsurfaceSteps ) {
 
 									rayDataStorage[ index ].throughputColor = vec3f( 0.0 );
 									rayDataStorage[ index ].emission = vec3f( 0.0 );

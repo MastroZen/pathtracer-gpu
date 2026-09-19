@@ -362,6 +362,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				materialKernel.rayCount = rayCount;
 				materialKernel.maxTransparentBounces = maxTransparentBounces;
 				materialKernel.maxBounces = this.maxBounces;
+				materialKernel.maxSubsurfaceSteps = this.maxSubsurfaceSteps;
 				materialKernel.targetDimensions.copy( targetDimensions );
 				renderer.compute( materialKernel.kernel, materialKernel.getDispatchSize( rayCount, 1, 1 ) );
 

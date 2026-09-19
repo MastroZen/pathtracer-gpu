@@ -1,6 +1,7 @@
 import { ColorManagement, FloatType, RGBAFormat } from 'three';
 import { RedIntegerFormat, StorageTexture, UnsignedIntType } from 'three/webgpu';
 import { ZeroOutKernel } from './compute/ZeroOutKernel.js';
+import { SUBSURFACE_MAX_STEPS } from './nodes/material.wgsl.js';
 
 export class PathTracerBackend {
 
@@ -13,6 +14,11 @@ export class PathTracerBackend {
 		// responsive on slower hardware; the unit is resolution independent.
 		this.frameBudget = 250000;
 		this.maxTransparentBounces = 15;
+
+		// Subsurface: how many steps the walk inside a volume may take before the path is
+		// dropped. It is the quality knob of the random walk - a dense medium needs many
+		// short steps to reach the other side, and stopping early loses that light.
+		this.maxSubsurfaceSteps = SUBSURFACE_MAX_STEPS;
 		this.lowResMode = false;
 
 		// stop taking samples once a pixel reaches this count. zero means no limit.

@@ -192,6 +192,27 @@ export class WebGPUPathTracer {
 	}
 
 	/**
+	 * How many steps the subsurface random walk may take inside a volume before the path
+	 * is dropped. Higher means a dense medium - a small radius - still reaches the other
+	 * side; lower is faster and loses that light rather than faking it.
+	 *
+	 * @type {number}
+	 * @default 64
+	 */
+	get maxSubsurfaceSteps() {
+
+		return this._pathTracer.maxSubsurfaceSteps;
+
+	}
+
+	set maxSubsurfaceSteps( v ) {
+
+		this._pathTracer.maxSubsurfaceSteps = v;
+		this._pathTracer.reset();
+
+	}
+
+	/**
 	 * Stops accumulating once every pixel reaches this many samples. A denoiser only runs once the
 	 * render has stopped, so it has no effect while this is `0`.
 	 * @type {number}
