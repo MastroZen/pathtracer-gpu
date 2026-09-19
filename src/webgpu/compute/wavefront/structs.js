@@ -91,6 +91,11 @@ export const rayDataStruct = new StructTypeNode( {
 	// side of the exit hit — and a walk through the volume needs to know it before the exit.
 	insideMaterial: 'int',
 
+	// Subsurface: how many steps the walk inside the volume has taken. A walk step is
+	// NOT a surface bounce, so it does not spend the bounce budget and carries one of
+	// its own - and that budget is the quality knob: it buys depth in a dense medium.
+	subsurfaceSteps: 'uint',
+
 }, 'RayData' );
 
 // A ray queued for BVH traversal by the trace kernels. A "maxDist" of zero traces unbounded.

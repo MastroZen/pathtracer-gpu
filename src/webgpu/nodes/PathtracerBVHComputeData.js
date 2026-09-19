@@ -904,6 +904,14 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// Subsurface - offset 279
 			floatArray[ index ++ ] = getField( m, 'subsurfaceWeight', 0.0 );
 
+			// offset 280: the radius is a Color so the three channels can differ, and it
+			// arrives already multiplied by the scale - the kernel wants a distance
+			const subsurfaceRadius = m.subsurfaceRadius;
+			floatArray[ index ++ ] = subsurfaceRadius ? subsurfaceRadius.r : 0.0;
+			floatArray[ index ++ ] = subsurfaceRadius ? subsurfaceRadius.g : 0.0;
+			floatArray[ index ++ ] = subsurfaceRadius ? subsurfaceRadius.b : 0.0;
+			floatArray[ index ++ ] = getField( m, 'subsurfaceAnisotropy', 0.0 );
+
 		}
 
 		return { materialData: intArray, textures };

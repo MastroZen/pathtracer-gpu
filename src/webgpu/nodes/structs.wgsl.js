@@ -173,7 +173,17 @@ export const materialStruct = new StructTypeNode( {
 	// surface. It is a closure among the others, picked the same way the mix is — which
 	// is what Cycles does, and the reason this sits next to the mix fields.
 	subsurfaceWeight: 'float',
-	// total size = 280
+
+	// offset 280 floats
+	// The mean free path of the walk, one per channel and already multiplied by the
+	// scale: it is a DISTANCE in world units, so it is the average step taken inside
+	// the volume before scattering again. A radius near zero is a surface, not a
+	// medium, and the kernel falls back to crossing in a straight line.
+	subsurfaceRadius: 'vec3',
+	// The Henyey-Greenstein g: 0 scatters in every direction, positive keeps going
+	// forward. Skin is around 0.8 in Blender.
+	subsurfaceAnisotropy: 'float',
+	// total size = 284
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

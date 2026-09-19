@@ -3,10 +3,10 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE } from '../../nodes/random.wgsl.js';
+import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
-import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc } from '../../nodes/material.wgsl.js';
+import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 
@@ -156,6 +156,7 @@ export class MaterialKernel extends ComputeKernel {
 					rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
 					// a camera ray starts OUTSIDE every medium
 					rayDataStorage[ index ].insideMaterial = - 1;
+					rayDataStorage[ index ].subsurfaceSteps = 0u;
 					rayDataStorage[ index ].dispersionWavelength = - mix( ${ DISPERSION_MIN_WAVELENGTH }.0, ${ DISPERSION_MAX_WAVELENGTH }.0, ${ rand1 }( ${ RNG_INDEX_DISPERSION_WAVELENGTH } ) );
 
 					// write the active params & dispatched flag
@@ -165,7 +166,86 @@ export class MaterialKernel extends ComputeKernel {
 
 					// evaluate the surface staged by LogicKernel
 					let indexUV = vec2u( input.pixelIndex >> 16, input.pixelIndex & 0xFFFF );
-					${ rngInit }( indexUV, input.seed, input.currentBounce + input.alphaDepth );
+					// the walk step counts like a bounce here: without it every step of a walk would
+					// draw the same numbers, and the path would march in a straight line
+					${ rngInit }( indexUV, input.seed, input.currentBounce + input.alphaDepth + input.subsurfaceSteps );
+
+					// ── SUBSURFACE: THE WALK INSIDE THE VOLUME ──
+					//
+					// Crossing in a straight line is not scattering: it makes a pane of frosted
+					// glass, not skin. Inside the medium the path takes a step of exponentially
+					// distributed length whose mean is the radius, and if that step ends BEFORE
+					// the wall the path scatters right there and carries on in a new direction.
+					// What leaves on the far side is soft and tinted because it was multiplied
+					// by the albedo once per step - the deeper the path, the redder it comes out,
+					// which is the whole look of skin.
+					//
+					// This is Cycles' random walk (subsurface_random_walk.h). Two divergences,
+					// both deliberate: the step length is drawn from the MEAN of the three radii
+					// instead of a channel picked at random - the colour still deepens with the
+					// number of steps, only the per-channel depth is shared - and the walk has a
+					// step budget instead of running to the end, which is how an open mesh is
+					// truncated over there too.
+					if ( input.insideMaterial >= 0 ) {
+
+						let medium = materials[ u32( input.insideMaterial ) ];
+						let radius = ( medium.subsurfaceRadius.r + medium.subsurfaceRadius.g + medium.subsurfaceRadius.b ) / 3.0;
+
+						// a radius near zero is a surface, not a medium: the path crosses straight
+						// and the exit below handles it
+						if ( radius > 1e-4 ) {
+
+							let stepDist = - log( max( 1.0 - ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } ), 1e-9 ) ) * radius;
+							if ( stepDist < input.dist ) {
+
+								// out of steps: the path is dropped where it stands rather than let out
+								// somewhere arbitrary. It loses its energy, and that is the truncation.
+								if ( input.subsurfaceSteps >= ${ SUBSURFACE_MAX_STEPS }u ) {
+
+									rayDataStorage[ index ].throughputColor = vec3f( 0.0 );
+									rayDataStorage[ index ].emission = vec3f( 0.0 );
+									rayDataStorage[ index ].lightPdf = 0.0;
+									rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+									return;
+
+								}
+
+								let scatterPoint = input.origin + input.direction * stepDist;
+								let nextDirection = ${ sampleHenyeyGreensteinFunc }(
+									input.direction, medium.subsurfaceAnisotropy,
+									${ rand2 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 1 ),
+								);
+
+								let walkIndex = atomicAdd( &rayQueue.length, 1u );
+								rayQueue.elements[ walkIndex ].origin = scatterPoint;
+								rayQueue.elements[ walkIndex ].direction = nextDirection;
+								rayQueue.elements[ walkIndex ].pixelIndex = input.pixelIndex;
+								rayQueue.elements[ walkIndex ].currentBounce = input.currentBounce;
+								rayQueue.elements[ walkIndex ].seed = input.seed;
+								rayQueue.elements[ walkIndex ].alphaDepth = input.alphaDepth;
+								// the direction changed, so whatever budget the old segment had does not
+								// apply: zero traces unbounded, the way an ordinary scatter does
+								rayQueue.elements[ walkIndex ].maxDist = 0.0;
+
+								// the surface is never reached, so nothing of it is staged: no emission
+								// and no NEE. "scatterColor" carries the albedo scaled by the pdf that
+								// LogicKernel will divide out, which leaves throughput *= albedo - the
+								// same trick the alpha pass through uses to leave it untouched.
+								rayDataStorage[ index ].subsurfaceSteps = input.subsurfaceSteps + 1u;
+								rayDataStorage[ index ].emission = vec3f( 0.0 );
+								rayDataStorage[ index ].scatterColor = medium.color * input.scatterPdf;
+								rayDataStorage[ index ].lightPdf = 0.0;
+								rayDataStorage[ index ].origin = scatterPoint;
+								rayDataStorage[ index ].direction = nextDirection;
+								rayDataStorage[ index ].rayIntersectionIndex = i32( walkIndex );
+								rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+								return;
+
+							}
+
+						}
+
+					}
 
 					let objectInfo = transforms[ u32( input.objectIndex ) ];
 					var materialInfo = materials[ objectInfo.materialIndex ];
@@ -351,6 +431,7 @@ export class MaterialKernel extends ComputeKernel {
 						// The sampled direction already points outward, because the surface above
 						// was rebuilt with the OUTWARD normal.
 						insideNext = - 1;
+						rayDataStorage[ index ].subsurfaceSteps = 0u;
 
 					} else if ( materialInfo.subsurfaceWeight > 0.0
 						&& ${ rand1 }( ${ RNG_INDEX_SUBSURFACE } ) < materialInfo.subsurfaceWeight ) {
