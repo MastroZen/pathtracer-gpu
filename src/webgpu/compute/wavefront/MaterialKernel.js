@@ -3,7 +3,7 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH } from '../../nodes/random.wgsl.js';
+import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc } from '../../nodes/material.wgsl.js';
@@ -42,6 +42,7 @@ export class MaterialKernel extends ComputeKernel {
 		const getCameraRayFn = proxyFn( 'bvhData.value.fns.getCameraRay', params );
 		const sampleTrianglePointFn = proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params );
 		const getSurfaceRecordFn = proxyFn( 'bvhData.value.fns.getSurfaceRecord', params );
+		const sampleMixFactorFn = proxyFn( 'bvhData.value.fns.sampleMixFactor', params );
 		const bsdfSampleFn = proxyFn( 'material.value.bsdfSample', params );
 		const bsdfEvalPdfFn = proxyFn( 'material.value.bsdfEvalPdf', params );
 
@@ -167,6 +168,42 @@ export class MaterialKernel extends ComputeKernel {
 					let objectInfo = transforms[ u32( input.objectIndex ) ];
 					var materialInfo = materials[ objectInfo.materialIndex ];
 
+					// The surface point is sampled HERE and no longer below: the mix can read
+					// a MASK, and a mask wants the uv of the hit.
+					var vertexData = ${ sampleTrianglePointFn }( input.barycoord, input.indices );
+					vertexData.normal = normalize( transpose( objectInfo.inverseMatrixWorld ) * vertexData.normal );
+					vertexData.tangent = vec4f( ( objectInfo.matrixWorld * vec4f( vertexData.tangent.xyz, 0.0 ) ).xyz, vertexData.tangent.w );
+
+					// ── MIX SHADER ──
+					//
+					// One branch is taken at random, in proportion to its weight, instead of
+					// evaluating both and blending: it is what Cycles does
+					// (surface_shader_bsdf_bssrdf_pick). The estimator stays unbiased because
+					// the branch is chosen with exactly its weight, a hit still costs a single
+					// BSDF, and the choice made here also governs the NEE shadow ray below —
+					// they share this record, which is the property a per-lobe blend would lose.
+					//
+					// A mix of N shaders arrives FLATTENED into a chain: at each link the
+					// record is kept with probability 1 - mixWeight, or the chain moves on to
+					// the next leaf. The weights are conditional, so the product telescopes
+					// back to the probability each leaf had in the tree.
+					//
+					// Every link draws a DIFFERENT dimension: these are dimensions of one
+					// sequence, so reusing an index would hand the chain the same number twice
+					// and pile the probability onto the first leaves. The bound is the number
+					// of reserved dimensions, and it also keeps wavefront lanes from diverging
+					// on depth.
+					for ( var mixStep = 0u; mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
+
+						// the factor is per hit: a wired Fac is a mask, and then it is the
+						// texture that decides the branch, pixel by pixel
+						let mixFac = ${ sampleMixFactorFn }( materialInfo, vertexData );
+						if ( mixFac <= 0.0 ) { break; }
+						if ( ${ rand1 }( ${ RNG_INDEX_MIX_SHADER } + mixStep ) >= mixFac ) { break; }
+						materialInfo = materials[ u32( materialInfo.mixIndex ) ];
+
+					}
+
 					// a matte surface hit by the camera ray renders as a fully transparent
 					let isMatte = materialInfo.matte != 0 && input.currentBounce == 0u;
 					if ( isMatte ) {
@@ -184,9 +221,6 @@ export class MaterialKernel extends ComputeKernel {
 					materialInfo.color *= objectInfo.color.rgb;
 					materialInfo.opacity *= objectInfo.color.a;
 
-					var vertexData = ${ sampleTrianglePointFn }( input.barycoord, input.indices );
-					vertexData.normal = normalize( transpose( objectInfo.inverseMatrixWorld ) * vertexData.normal );
-					vertexData.tangent = vec4f( ( objectInfo.matrixWorld * vec4f( vertexData.tangent.xyz, 0.0 ) ).xyz, vertexData.tangent.w );
 					vertexData.position = objectInfo.matrixWorld * vertexData.position;
 
 					let view = - input.direction;

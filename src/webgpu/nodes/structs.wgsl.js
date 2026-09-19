@@ -150,7 +150,28 @@ export const materialStruct = new StructTypeNode( {
 
 	// offset 264 floats
 	anisotropyMapTransform: 'mat3',
-	// total size = 276
+
+	// offset 276 floats
+	// Mix Shader: this material can stand for a stochastic choice between itself and
+	// another one in the table. "mixWeight" is the probability of taking "mixIndex";
+	// zero means there is no mix and the record is used as is. Picking one branch per
+	// hit rather than evaluating both is how Cycles handles Mix Shader
+	// (surface_shader_bsdf_bssrdf_pick): the estimator stays unbiased and a hit still
+	// costs a single BSDF.
+	mixWeight: 'float',
+	mixIndex: 'int',
+	// Padded by hand to a multiple of four, the way transformStruct does it: the
+	// writer advances one field at a time through a buffer strided by getLength(),
+	// so a struct that does not land on the stride shifts every record after the
+	// first. It shows up as a mix that renders darker than either branch, which
+	// looks like a physics bug and is an offset bug.
+	// A wired Fac is a MASK: the index of its texture lives here. No transform beside
+	// it, unlike the other maps — a baked mask has no offset or repeat, and a mat3 per
+	// material to carry an identity is twelve floats each.
+	mixMap: 'int',
+	// The one left is where a subsurface record will start.
+	_mixAlignment1: 'float',
+	// total size = 280
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

@@ -6,6 +6,13 @@ export const RNG_INDEX_APERTURE_SAMPLE = 4;
 export const RNG_INDEX_DIRECT_LIGHT_SAMPLE = 5;
 export const RNG_INDEX_RUSSIAN_ROULETTE = 6;
 export const RNG_INDEX_DISPERSION_WAVELENGTH = 7;
+// Mix Shader: the draws that pick one leaf of a mix. A mix of N shaders is walked
+// as a chain of conditional choices, and each link must draw an INDEPENDENT
+// number: these indices are dimensions of the same sequence, so reusing one would
+// hand the chain the same value twice and bias it toward the first leaves.
+// Eight dimensions are reserved, which is the depth the kernel loop walks.
+export const RNG_INDEX_MIX_SHADER = 8;
+export const RNG_INDEX_MIX_SHADER_COUNT = 8;
 export const RNG_INDEX_ALPHA_TEST = 50;
 import { contextProxyFn } from 'three-mesh-bvh/webgpu';
 import * as sobol from './rand/sobol.wgsl.js';

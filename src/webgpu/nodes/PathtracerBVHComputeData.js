@@ -5,7 +5,7 @@ import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
 import { materialStruct } from './structs.wgsl.js';
 import { getTextureHash } from '../../core/utils/sceneUpdateUtils.js';
 import { sampleTexelFunc } from './utils.wgsl.js';
-import { getSurfaceRecordFunc } from './material.wgsl.js';
+import { getSurfaceRecordFunc, mixFactorFunc } from './material.wgsl.js';
 import { AtlasTexture } from '../AtlasTexture.js';
 
 const _colorVec = new Vector4();
@@ -175,6 +175,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// getSurfaceRecord shares the same sampleTexel, so the surface shading and
 		// the transparency raycast resolve to one textureInfo binding per pipeline
 		fns.getSurfaceRecord = getSurfaceRecordFunc( sampleTexel, fns.getUvFromChannel, fns.getColor );
+		fns.sampleMixFactor = mixFactorFunc( sampleTexel, fns.getUvFromChannel );
 
 		// raycast first hit, bounded by the ray's "maxDist" - 0 means unbounded
 		const currentMaterialIndex = uint().toVar( 'bvh_materialIndex' );
@@ -453,6 +454,12 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 				materials.push( mat );
 				materialsMap.set( mat, - 1 );
+
+				// Mix Shader: the other branch usually belongs to no mesh of its own, so
+				// walking the scene would never reach it. Following the reference here is
+				// what lets a mix be expressed without a decoy object for the second
+				// shader. Recursing covers nested mixes, and the guard above stops cycles.
+				if ( mat.mixMaterial ) add( mat.mixMaterial );
 
 			}
 
@@ -884,6 +891,16 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			// anisotropyMap transform - offset 264
 			index += writeTextureMatrixToArray( m, 'anisotropyMap', floatArray, index );
+
+			// Mix Shader - offset 276
+			// A branch that never made it into the table would leave the kernel indexing
+			// out of range, so a missing reference zeroes the weight instead: the record
+			// then reads as "no mix", which is the one safe answer.
+			const mixIndex = m.mixMaterial ? materials.indexOf( m.mixMaterial ) : - 1;
+			floatArray[ index ++ ] = mixIndex < 0 ? 0.0 : getField( m, 'mixWeight', 0.0 );
+			intArray[ index ++ ] = Math.max( 0, mixIndex );
+			intArray[ index ++ ] = getTexture( m, 'mixMap' );
+			floatArray[ index ++ ] = 0.0;
 
 		}
 

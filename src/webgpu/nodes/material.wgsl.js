@@ -133,6 +133,33 @@ const ensureValidViewNormal = wgslTagFn/* wgsl */`
 // clamps to zero for any path pdf when the inverted filter value is this large.
 export const FILTER_GLOSSY_DISABLED = 3.402823466e38;
 
+// Mix Shader: the factor of a mix, read per hit. A wired Fac is a MASK — a texture —
+// so the number changes across the surface and the stochastic pick has to draw
+// against the local value rather than the flat one. It is built here because this is
+// where the atlas sampler and the uv channel lookup are in scope.
+//
+// The red channel carries the mask: a grayscale bake, and reading one channel keeps
+// the record to a single index instead of a swizzle no one would set.
+//
+// The dependencies are declared, the way getSurfaceRecordFunc does below: without
+// them the generated WGSL carries neither helper and the kernel does not compile.
+export const mixFactorFunc = ( sampleTexel, getUvFromChannel ) => wgslFn( /* wgsl */ `
+
+	fn mixFactor( material: Material, vertexData: bvh_GeometryStruct ) -> f32 {
+
+		if ( material.mixMap == -1 ) {
+
+			return material.mixWeight;
+
+		}
+
+		let uv = getUvFromChannel( vertexData, material.mixMap );
+		return sampleTexel( uv, material.mixMap, 0 ).r;
+
+	}
+
+`, [ sampleTexel, getUvFromChannel ] );
+
 export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) => wgslFn( /* wgsl */ `
 
 	fn getSurfaceRecord(
