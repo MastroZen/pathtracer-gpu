@@ -188,16 +188,63 @@ export class MaterialKernel extends ComputeKernel {
 					// number of steps, only the per-channel depth is shared - and the walk has a
 					// step budget instead of running to the end, which is how an open mesh is
 					// truncated over there too.
+					var walkTransmittance = vec3f( 1.0 );
 					if ( input.insideMaterial >= 0 ) {
 
 						let medium = materials[ u32( input.insideMaterial ) ];
-						let radius = ( medium.subsurfaceRadius.r + medium.subsurfaceRadius.g + medium.subsurfaceRadius.b ) / 3.0;
 
 						// a radius near zero is a surface, not a medium: the path crosses straight
 						// and the exit below handles it
-						if ( radius > 1e-4 ) {
+						if ( max( medium.subsurfaceRadius.r, max( medium.subsurfaceRadius.g, medium.subsurfaceRadius.b ) ) > 1e-4 ) {
 
-							let stepDist = - log( max( 1.0 - ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } ), 1e-9 ) ) * radius;
+							// ── ONE MEAN FREE PATH PER CHANNEL, which is what makes skin skin ──
+							//
+							// Red travels about ten times deeper than blue through flesh, so a
+							// shallow crossing comes out pale and a deep one comes out red: that
+							// bleed is the whole reason subsurface exists, and a single averaged
+							// radius cannot produce it.
+							//
+							// A step can only be drawn for ONE channel, so one is picked at random
+							// and the result is weighted by the mixture pdf - the standard spectral
+							// estimator, and Cycles' bssrdf_channel_pdf is the same idea. The
+							// weight is a vec3: the channel that was picked is not the only one
+							// that gets carried, it is only the one that chose the distance.
+							// ── E IL RAGGIO NON E' IL CAMMINO LIBERO: c'e' una CONVERSIONE ──
+							//
+							// Quel che l'utente scrive e' il raggio di DIFFUSIONE - quanto lontano
+							// la luce riemerge - e il colore e' l'albedo di SUPERFICIE. Il cammino
+							// vuole altre due cose: il libero cammino medio e l'albedo di singolo
+							// scattering, che sono molto piu' corti e molto piu' alti.
+							//
+							// La conversione e' la fit di Christensen-Burley, presa da Cycles
+							// (subsurface_random_walk_coefficients). Senza, raggio e colore non
+							// vogliono dire quel che vogliono dire di la': il risultato viene piu'
+							// scuro, piu' rumoroso, e un valore copiato da Blender non torna.
+							let surfaceAlbedo = medium.color;
+							// il pavimento a 0,2 e' di Cycles: sotto, la fit fa uno scalino visibile
+							let alpha = max( vec3f( 1.0 ) - exp( surfaceAlbedo * ( - 5.09406 + surfaceAlbedo * ( 2.61188 - surfaceAlbedo * 4.31805 ) ) ), vec3f( 0.2 ) );
+							let shrink = 1.9 - surfaceAlbedo + 3.5 * ( surfaceAlbedo - 0.8 ) * ( surfaceAlbedo - 0.8 );
+							let radius = max( medium.subsurfaceRadius * shrink, vec3f( 1e-6 ) );
+							let sigma = 1.0 / radius;
+							// ── IL CANALE SI SORTEGGIA SU alpha * throughput ──
+							//
+							// E' volume_sample_channel di Cycles, letto nel sorgente: il canale che
+							// il cammino porta gia' si pesca piu' spesso, e il peso resta vicino a
+							// uno. Provata anche la strada opposta — una distribuzione sola col
+							// sigma medio pesato — ed e' PEGGIO, misurato sulla scena di un utente:
+							// piu' polvere, non meno.
+							var channelP = vec3f( 1.0 / 3.0 );
+							let carried = max( input.throughputColor * alpha, vec3f( 0.0 ) );
+							let carriedSum = carried.r + carried.g + carried.b;
+							if ( carriedSum > 1e-9 ) { channelP = carried / carriedSum; }
+
+							let pick = ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 1 );
+							var channel = 2u;
+							if ( pick < channelP.r ) { channel = 0u; }
+							else if ( pick < channelP.r + channelP.g ) { channel = 1u; }
+
+							let stepDist = - log( max( 1.0 - ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } ), 1e-9 ) ) / sigma[ channel ];
+
 							if ( stepDist < input.dist ) {
 
 								// out of steps: the path is dropped where it stands rather than let out
@@ -212,10 +259,16 @@ export class MaterialKernel extends ComputeKernel {
 
 								}
 
+								// sigma_s * T / pdf, with pdf the MEAN over the three channels: the
+								// one that drew the distance does not get to keep all the weight
+								let transmittance = exp( - sigma * stepDist );
+								let stepPdf = dot( channelP * sigma * transmittance, vec3f( 1.0 ) );
+								let stepWeight = alpha * sigma * transmittance / max( stepPdf, 1e-9 );
+
 								let scatterPoint = input.origin + input.direction * stepDist;
 								let nextDirection = ${ sampleHenyeyGreensteinFunc }(
 									input.direction, medium.subsurfaceAnisotropy,
-									${ rand2 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 1 ),
+									${ rand2 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 2 ),
 								);
 
 								let walkIndex = atomicAdd( &rayQueue.length, 1u );
@@ -235,7 +288,7 @@ export class MaterialKernel extends ComputeKernel {
 								// same trick the alpha pass through uses to leave it untouched.
 								rayDataStorage[ index ].subsurfaceSteps = input.subsurfaceSteps + 1u;
 								rayDataStorage[ index ].emission = vec3f( 0.0 );
-								rayDataStorage[ index ].scatterColor = medium.color * input.scatterPdf;
+								rayDataStorage[ index ].scatterColor = stepWeight * input.scatterPdf;
 								rayDataStorage[ index ].lightPdf = 0.0;
 								rayDataStorage[ index ].origin = scatterPoint;
 								rayDataStorage[ index ].direction = nextDirection;
@@ -244,6 +297,12 @@ export class MaterialKernel extends ComputeKernel {
 								return;
 
 							}
+
+							// the step went past the wall: the path crosses, attenuated by what the
+							// medium absorbed along the way. THIS is where the red edge comes from -
+							// a long crossing keeps the red and loses the blue.
+							let crossed = exp( - sigma * input.dist );
+							walkTransmittance = crossed / max( dot( channelP * crossed, vec3f( 1.0 ) ), 1e-9 );
 
 						}
 
@@ -386,6 +445,14 @@ export class MaterialKernel extends ComputeKernel {
 					// apply the hero wavelength to dispersive surfaces, folding the spectral weight
 					// into the throughput at the path's first dispersive interaction
 					var throughputColor = input.throughputColor;
+					// what the medium absorbed on the way to this wall. One everywhere else, so
+					// the multiplication costs nothing when there is no volume.
+					if ( input.insideMaterial >= 0 ) {
+
+						throughputColor *= walkTransmittance;
+						rayDataStorage[ index ].throughputColor = throughputColor;
+
+					}
 					let isDispersive = materialInfo.dispersion > 0.0 && surface.ior > 1.0 && surface.transmission > 0.0 && ! surface.thinWall;
 					if ( isDispersive ) {
 
@@ -427,6 +494,9 @@ export class MaterialKernel extends ComputeKernel {
 					// opposite normal, with the same pdf. One reflection instead of a second
 					// basis and a second pair of random numbers.
 					var insideNext = input.insideMaterial;
+					// a hit that goes in has PICKED the bssrdf closure, so the surface one is not
+					// there to be lit: see the NEE block at the bottom
+					var enteredSubsurface = false;
 					if ( input.insideMaterial >= 0 ) {
 
 						// the path was travelling inside and has reached the surface: it leaves.
@@ -441,6 +511,7 @@ export class MaterialKernel extends ComputeKernel {
 						let faceNormal = input.normal * input.side;
 						scatterRec.direction = scatterRec.direction - 2.0 * dot( scatterRec.direction, faceNormal ) * faceNormal;
 						insideNext = i32( objectInfo.materialIndex );
+						enteredSubsurface = true;
 
 					}
 					rayDataStorage[ index ].insideMaterial = insideNext;
@@ -499,7 +570,14 @@ export class MaterialKernel extends ComputeKernel {
 
 					// evaluate the bsdf toward the light LogicKernel selected and enqueue the shadow ray.
 					// the light pdf will be 0 if NEE is disabled.
-					var lightPdf = input.lightPdf;
+					//
+					// A hit that entered the volume is skipped: the pick chose the bssrdf, and
+					// lighting the surface closure as well would ADD the light instead of moving
+					// it. Measured on a slab with the weight at 1 - the lit face lost 0.68 while
+					// the shadowed one gained 19.18, when the lit face should go nearly dark. It
+					// is the same rule the mix already follows: one closure per hit, and NEE is
+					// for the one that was picked.
+					var lightPdf = select( input.lightPdf, 0.0, enteredSubsurface );
 					if ( lightPdf > 0.0 ) {
 
 						let evalRec = ${ bsdfEvalPdfFn }( view, input.lightDirection, surface );

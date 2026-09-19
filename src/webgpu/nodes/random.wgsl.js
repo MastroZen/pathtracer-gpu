@@ -16,8 +16,8 @@ export const RNG_INDEX_MIX_SHADER_COUNT = 8;
 // Subsurface: the draw that decides whether a hit goes into the volume. It is the same
 // kind of choice as the mix — one closure among the others — so it sits right after.
 export const RNG_INDEX_SUBSURFACE = 16;
-// The walk inside the volume: one dimension for the length of the step and two for the
-// direction of the next one. A step is dispatched like a bounce, so the sequence is
+// The walk inside the volume: one dimension for the length of the step, one for the
+// channel that draws it, and two for the direction of the next one. A step is dispatched like a bounce, so the sequence is
 // advanced by the step count in rngInit - reusing an index without that would draw the
 // same number at every step and the walk would march in a straight line.
 export const RNG_INDEX_SUBSURFACE_WALK = 17;
