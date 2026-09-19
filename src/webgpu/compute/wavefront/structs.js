@@ -96,32 +96,6 @@ export const rayDataStruct = new StructTypeNode( {
 	// its own - and that budget is the quality knob: it buys depth in a dense medium.
 	subsurfaceSteps: 'uint',
 
-	// ── QUEL CHE DEVE VIAGGIARE, E NIENTE DI PIU' ──
-	//
-	// Cycles decide e risolve un segmento dentro un giro solo del suo ciclo. Qui il
-	// segmento NASCE a un passo e si RISOLVE al successivo, perche' in mezzo c'e' il
-	// lancio del raggio, che e' un altro dispatch. Quindi quel che il peso vuole deve
-	// viaggiare col cammino — ma SOLO quel che dipende dalla direzione: il canale e la
-	// distanza si pescano al momento della risoluzione, dove il throughput e' quello
-	// vero. Portarli invece che pescarli costa il 18% di rumore, misurato.
-	//
-	// "subsurfaceNormal" e' la normale ESTERNA da cui il cammino e' entrato: e' il
-	// verso in cui la guida pende, e l'unica cosa che un punto dentro il volume sa su
-	// dove sia la superficie.
-	subsurfaceNormal: 'vec3f',
-	// 1 - cos / v, lo stiramento di Dwivedi di questa direzione
-	subsurfaceStretch: 'float',
-
-	// la pdf guidata diviso quella classica, col valore della fase gia' semplificato
-	subsurfacePdfFactor: 'float',
-	// la guida ha estratto DAVVERO questa direzione? decide se la distanza si stira
-	subsurfaceGuided: 'uint',
-	// Quanti metri di materia ci sono fra l'ingresso e la parete opposta, misurati
-	// lungo la normale d'ingresso. Non costa un raggio in piu': il PRIMO segmento del
-	// cammino la attraversa per intero, e la sua distanza tracciata e' esattamente
-	// questa. Serve a sapere se il mezzo e' otticamente SPESSO, che e' l'unico posto
-	// dove la guida di Dwivedi paga.
-	subsurfaceOpposite: 'float',
 
 }, 'RayData' );
 

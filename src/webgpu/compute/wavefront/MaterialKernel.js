@@ -6,7 +6,7 @@ import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
-import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc, henyeyGreensteinPdfFunc, directionFromCosineFunc, diffusionLengthDwivediFunc, samplePhaseDwivediFunc, evalPhaseDwivediFunc } from '../../nodes/material.wgsl.js';
+import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 
@@ -188,6 +188,34 @@ export class MaterialKernel extends ComputeKernel {
 					// number of steps, only the per-channel depth is shared - and the walk has a
 					// step budget instead of running to the end, which is how an open mesh is
 					// truncated over there too.
+					// ── SUBSURFACE: THE WALK INSIDE THE VOLUME ──
+					//
+					// Crossing in a straight line makes frosted glass, not skin. Inside the
+					// medium the path takes a step of exponentially distributed length and, if
+					// that step ends before the wall, scatters there and carries on. What leaves
+					// is soft and tinted because it was multiplied by the albedo once per step,
+					// and because each channel has its own mean free path: red goes about ten
+					// times deeper through flesh than blue.
+					//
+					// This is Cycles' random walk (subsurface_random_walk.h) without its DWIVEDI
+					// GUIDING, and the missing piece is a measured decision, not an omission. The
+					// guide leans the direction toward the interface the path came in through, and
+					// its strength comes from the diffusion length, which Cycles computes from the
+					// HIGHEST of the three single scattering albedos - deliberately, to stay on
+					// the safe side of fireflies. That leaves a vice: with a bright albedo the
+					// diffusion length is huge and the guided distribution is uniform, so it
+					// guides nothing; with a dark one the walk is absorbed in two or three
+					// scatters and there is nothing to guide. Measured on a 2 m cube with a 1 cm
+					// mean free path, noise between neighbouring pixels, denoiser off:
+					//
+					//   #fff1cc  10.28 guided against 9.19 - and the mean moves, 129.4 vs 131.4
+					//   #cc6644   4.25 against 4.18, means equal
+					//   #332211   1.30 against 1.27, means equal
+					//
+					// It was here for a while, forward half only, and it measured a 26% gain -
+					// on a remap that was wrong. With the remap read from the source instead of
+					// memory the gain evaporated, which is the whole lesson: an optimisation
+					// measured on a broken foundation measures the foundation.
 					var walkTransmittance = vec3f( 1.0 );
 					if ( input.insideMaterial >= 0 ) {
 
@@ -197,25 +225,6 @@ export class MaterialKernel extends ComputeKernel {
 						// and the exit below handles it
 						if ( max( medium.subsurfaceRadius.r, max( medium.subsurfaceRadius.g, medium.subsurfaceRadius.b ) ) > 1e-4 ) {
 
-							// ── ONE MEAN FREE PATH PER CHANNEL, which is what makes skin skin ──
-							//
-							// Red travels about ten times deeper than blue through flesh, so a
-							// shallow crossing comes out pale and a deep one comes out red: that
-							// bleed is the whole reason subsurface exists, and a single averaged
-							// radius cannot produce it.
-							//
-							// A step can only be drawn for ONE channel, so one is picked at random
-							// and the result is weighted by the mixture pdf - the standard spectral
-							// estimator, and Cycles' bssrdf_channel_pdf is the same idea. The
-							// weight is a vec3: the channel that was picked is not the only one
-							// that gets carried, it is only the one that chose the distance.
-							// ── E IL RAGGIO NON E' IL CAMMINO LIBERO: c'e' una CONVERSIONE ──
-							//
-							// Quel che l'utente scrive e' il raggio di DIFFUSIONE - quanto lontano
-							// la luce riemerge - e il colore e' l'albedo di SUPERFICIE. Il cammino
-							// vuole altre due cose: il libero cammino medio e l'albedo di singolo
-							// scattering, che sono molto piu' corti e molto piu' alti.
-							//
 							// La conversione sta in subsurfaceAlpha / subsurfaceSigma, ed e' quella
 							// di Cycles LETTA NEL SORGENTE: la prima versione era scritta a memoria
 							// e sbagliava sia l'albedo (ignorava l'anisotropia, e aveva un pavimento
@@ -223,13 +232,13 @@ export class MaterialKernel extends ComputeKernel {
 							// appartiene al profilo di diffusione, non al cammino).
 							let alpha = ${ subsurfaceAlphaFunc }( medium.color, medium.subsurfaceAnisotropy );
 							let sigma = ${ subsurfaceSigmaFunc }( medium.subsurfaceRadius );
+
 							// ── IL CANALE SI SORTEGGIA SU alpha * throughput ──
 							//
-							// E' volume_sample_channel di Cycles, letto nel sorgente: il canale che
-							// il cammino porta gia' si pesca piu' spesso, e il peso resta vicino a
-							// uno. Provata anche la strada opposta — una distribuzione sola col
-							// sigma medio pesato — ed e' PEGGIO, misurato sulla scena di un utente:
-							// piu' polvere, non meno.
+							// E' volume_sample_channel di Cycles: il canale che il cammino porta
+							// gia' si pesca piu' spesso, e il peso resta vicino a uno. Si pesca QUI
+							// e non un passo fa, sul throughput che c'e' davvero: portarlo costa il
+							// 18% di rumore invece di risparmiarlo.
 							var channelP = vec3f( 1.0 / 3.0 );
 							let carried = max( input.throughputColor * alpha, vec3f( 0.0 ) );
 							let carriedSum = carried.r + carried.g + carried.b;
@@ -240,87 +249,31 @@ export class MaterialKernel extends ComputeKernel {
 							if ( pick < channelP.r ) { channel = 0u; }
 							else if ( pick < channelP.r + channelP.g ) { channel = 1u; }
 
-							// ── LA DISTANZA SI STIRA SE LA DIREZIONE ERA GUIDATA ──
-							//
-							// Lo stiramento e' la meta' della guida di Dwivedi, e le due sono UN
-							// meccanismo solo: pendere verso l'uscita senza allungare il passo che
-							// ci va peggiora invece di migliorare (misurato, 19,98 -> 23,43). Lo
-							// stiramento arriva col segmento perche' dipende dalla sua direzione,
-							// scelta un passo fa.
-							let guidedStretch = select( 1.0, input.subsurfaceStretch, input.subsurfaceGuided == 1u );
 							let stepDist = - log( max( 1.0 - ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } ), 1e-9 ) )
-								/ max( sigma[ channel ] * guidedStretch, 1e-6 );
+								/ max( sigma[ channel ], 1e-6 );
 
-							// ── E LA PDF DEL SEGMENTO E' LA MISCELA DELLE DUE STRATEGIE ──
-							//
-							// Questa direzione poteva venire da entrambe, quindi entrambe le pdf
-							// contano — la euristica di bilancio, come per i canali. Sul PRIMO
-							// segmento no: li' la direzione e' quella che la superficie ha
-							// rifratto, non una che la fase ha estratto, quindi e' classica.
-							// ── QUANTO SI GUIDA, E PERCHE' NON COME CYCLES ──
-							//
-							// Di la' la frazione e' 1 - max(0.5, |g|^0.125), cioe' meta' dei
-							// campioni al piu'. Quel tetto serve a loro perche' guidano anche
-							// ALL'INDIETRO, verso l'interfaccia opposta, e le due meta' si dividono
-							// il budget; noi abbiamo solo quella in avanti, che vuole un raggio
-							// tracciato per sapere dov'e' l'altra parete.
-							//
-							// Con la sola meta' in avanti la forma giusta e' un'altra, e sta in una
-							// tabella misurata su un cubo di 2 m con cammino libero di 1 cm (rumore
-							// fra pixel vicini, denoise spento):
-							//
-							//   g = 0     7,68 guidando  contro  10,43  -> il 26% in meno
-							//   g = 0,4  13,10           contro  12,99  -> pari
-							//   g = 0,8  23,95           contro  21,65  -> peggio, E la media
-							//                                              scende da 134 a 131
-							//
-							// Dwivedi e' derivato per mezzi ISOTROPI: piu' il mezzo diffonde in
-							// avanti, meno la guida somiglia alla fase, e le due strategie finiscono
-							// per discordare invece che aiutarsi. Quindi si spegne dove smette di
-							// pagare, e non si accende «un po'» dove non serve. Il nostro default e'
-							// zero, quindi cera, marmo e latte prendono il guadagno; la pelle a 0,8
-							// resta esattamente com'era.
-							// ── E SOLO SE IL MEZZO E' OTTICAMENTE SPESSO ──
-							//
-							// La guida in avanti riporta i cammini verso la parete da cui sono
-							// entrati. In un mezzo profondo e' quel che serve — escono prima invece
-							// di vagare. In un mezzo SOTTILE toglie la traversata: misurato su un
-							// pannello di 12 cm con cammino libero di 2 cm, cioe' sei cammini liberi
-							// di spessore, la faccia in ombra passa da 3,7 a 2,7. Il 27% di luce che
-							// non arriva piu' dall'altra parte.
-							//
-							// Di la' il rimedio e' la guida ALL'INDIETRO, verso l'interfaccia
-							// opposta, che noi non abbiamo. Quel che abbiamo e' la sua distanza, e
-							// gratis: il primo segmento attraversa l'oggetto per intero. Venti
-							// cammini liberi e' la soglia — sotto, il pannello del banco (6) resta
-							// com'era; sopra, il cubo dell'utente (200) prende il guadagno.
-							let opticalDepth = input.subsurfaceOpposite * ( sigma.r + sigma.g + sigma.b ) / 3.0;
-							let anisotropy = medium.subsurfaceAnisotropy;
-							let guidedFraction = select( 0.0, max( 0.0, 1.0 - abs( anisotropy ) / 0.4 ), opticalDepth > 20.0 );
 							let reachedWall = stepDist >= input.dist;
 							let travelled = min( stepDist, input.dist );
 							let transmittance = exp( - sigma * travelled );
 
-							var segmentPdf = select( sigma * transmittance, transmittance, reachedWall );
-							if ( input.subsurfaceSteps > 0u ) {
-
-								let stretched = sigma * input.subsurfaceStretch;
-								let stretchedT = exp( - stretched * travelled );
-								let guidedPdf = input.subsurfacePdfFactor * select( stretched * stretchedT, stretchedT, reachedWall );
-								segmentPdf = mix( segmentPdf, guidedPdf, guidedFraction );
-
-							}
-
-							// sigma_s * T / pdf diffondendo, T / pdf arrivando alla parete. Il
-							// valore della fase non e' al numeratore perche' e' gia' stato
-							// semplificato dentro il fattore di pdf.
+							// sigma_s * T / pdf diffondendo, T / pdf arrivando alla parete, con
+							// l'euristica di bilancio sui tre canali
+							let segmentPdf = select( sigma * transmittance, transmittance, reachedWall );
 							let segmentWeight = select( alpha * sigma * transmittance, transmittance, reachedWall )
 								/ max( dot( channelP, segmentPdf ), 1e-9 );
 
-							if ( ! reachedWall ) {
+							if ( reachedWall ) {
 
-								// out of steps: the path is dropped where it stands rather than let out
-								// somewhere arbitrary. It loses its energy, and that is the truncation.
+								// il passo ha superato la parete: il cammino attraversa, attenuato da
+								// quel che il mezzo ha assorbito. E' QUI che nasce il bordo rosso —
+								// una traversata lunga tiene il rosso e perde il blu.
+								walkTransmittance = segmentWeight;
+
+							} else {
+
+								// finiti i passi: il cammino si lascia cadere dov'e' invece di uscire
+								// da qualche parte a caso. Perde la sua energia, ed e' il troncamento
+								// che Cycles fa su una mesh non chiusa.
 								if ( input.subsurfaceSteps >= maxSubsurfaceSteps ) {
 
 									rayDataStorage[ index ].throughputColor = vec3f( 0.0 );
@@ -332,59 +285,10 @@ export class MaterialKernel extends ComputeKernel {
 								}
 
 								let scatterPoint = input.origin + input.direction * travelled;
-
-								// ── DWIVEDI: la direzione si GUIDA verso l'uscita ──
-								//
-								// Un cammino in un mezzo denso vaga, e quasi tutti i suoi passi non
-								// vanno verso l'uscita: e' li' che nasce il rumore. La distribuzione
-								// di Dwivedi pende verso l'interfaccia da cui il cammino e' entrato.
-								// Con un mezzo che diffonde in avanti il cammino ci va gia' da se' e
-								// la guida si spegne quasi del tutto: la pelle a 0,8 la usa il 3%
-								// delle volte.
-								//
-								// La frazione e' quella di Cycles SENZA il suo tetto di 0,5, e il
-								// tetto mancante e' una divergenza MISURATA: di la' meta' dei
-								// campioni al massimo sono guidati perche' guidano anche
-								// ALL'INDIETRO, verso l'interfaccia opposta, e le due si dividono il
-								// budget. Noi abbiamo solo la meta' in avanti, e mescolarla a meta'
-								// col classico non rende niente — le due strategie discordano, e la
-								// discordanza costa quanto la guida guadagna. Misurato su un cubo di
-								// 2 m con cammino libero di 1 cm, isotropo: 10,43 senza guida,
-								// 10,52 alla meta' di Cycles, 7,95 guidando sempre.
-								let albedoMax = max( alpha.r, max( alpha.g, alpha.b ) );
-								let diffusionLength = ${ diffusionLengthDwivediFunc }( albedoMax );
-								let phaseLog = log( ( diffusionLength + 1.0 ) / max( diffusionLength - 1.0, 1e-6 ) );
-								let guideNormal = input.subsurfaceNormal;
-								let useGuided = ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 4 ) < guidedFraction;
-
-								var nextDirection: vec3f;
-								if ( useGuided ) {
-
-									let guidedCos = ${ samplePhaseDwivediFunc }(
-										diffusionLength, phaseLog, ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 5 ),
-									);
-									nextDirection = ${ directionFromCosineFunc }(
-										guideNormal, guidedCos, ${ rand1 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 6 ),
-									);
-
-								} else {
-
-									nextDirection = ${ sampleHenyeyGreensteinFunc }(
-										input.direction, anisotropy,
-										${ rand2 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 2 ),
-									);
-
-								}
-
-								// lo stiramento si tiene per TUTTI i segmenti, perche' la pdf guidata
-								// e' quella che la guida AVREBBE avuto, chiunque l'abbia poi estratta;
-								// si applica al campionamento solo se l'ha estratta lei. Applicarlo
-								// sempre rende la miscela una bugia e l'immagine esce il 5% piu'
-								// scura — misurato, ed e' il difetto che questa riga nomina.
-								let cosGuide = dot( nextDirection, guideNormal );
-								let phaseValue = max( ${ henyeyGreensteinPdfFunc }( dot( input.direction, nextDirection ), anisotropy ), 1e-9 );
-								let nextPdfFactor = ${ evalPhaseDwivediFunc }( diffusionLength, phaseLog, cosGuide ) / phaseValue;
-								let nextStretch = max( 1.0 - cosGuide / diffusionLength, 1e-3 );
+								let nextDirection = ${ sampleHenyeyGreensteinFunc }(
+									input.direction, medium.subsurfaceAnisotropy,
+									${ rand2 }( ${ RNG_INDEX_SUBSURFACE_WALK } + 2 ),
+								);
 
 								let walkIndex = atomicAdd( &rayQueue.length, 1u );
 								rayQueue.elements[ walkIndex ].origin = scatterPoint;
@@ -393,25 +297,16 @@ export class MaterialKernel extends ComputeKernel {
 								rayQueue.elements[ walkIndex ].currentBounce = input.currentBounce;
 								rayQueue.elements[ walkIndex ].seed = input.seed;
 								rayQueue.elements[ walkIndex ].alphaDepth = input.alphaDepth;
-								// the direction changed, so whatever budget the old segment had does not
-								// apply: zero traces unbounded, the way an ordinary scatter does
+								// la direzione e' cambiata, quindi il budget del segmento vecchio non
+								// vale: zero traccia senza limite, come uno scatter qualsiasi
 								rayQueue.elements[ walkIndex ].maxDist = 0.0;
 
-								// the surface is never reached, so nothing of it is staged: no emission
-								// and no NEE. "scatterColor" carries the albedo scaled by the pdf that
-								// LogicKernel will divide out, which leaves throughput *= albedo - the
-								// same trick the alpha pass through uses to leave it untouched.
+								// la superficie non viene mai raggiunta, quindi non se ne mette in
+								// scena niente: nessuna emissione e nessuna NEE. "scatterColor" porta
+								// il peso moltiplicato per la pdf che LogicKernel dividera', che
+								// lascia il throughput moltiplicato per il peso — lo stesso trucco
+								// del passaggio attraverso l'alpha.
 								rayDataStorage[ index ].subsurfaceSteps = input.subsurfaceSteps + 1u;
-								rayDataStorage[ index ].subsurfaceStretch = nextStretch;
-								rayDataStorage[ index ].subsurfacePdfFactor = nextPdfFactor;
-								rayDataStorage[ index ].subsurfaceGuided = select( 0u, 1u, useGuided );
-								// il primo segmento ha appena misurato lo spessore: la sua distanza,
-								// proiettata sulla normale d'ingresso. Dopo si tiene quella.
-								rayDataStorage[ index ].subsurfaceOpposite = select(
-									input.subsurfaceOpposite,
-									input.dist * max( dot( input.direction, - guideNormal ), 0.0 ),
-									input.subsurfaceSteps == 0u,
-								);
 								rayDataStorage[ index ].emission = vec3f( 0.0 );
 								rayDataStorage[ index ].scatterColor = segmentWeight * input.scatterPdf;
 								rayDataStorage[ index ].lightPdf = 0.0;
@@ -422,11 +317,6 @@ export class MaterialKernel extends ComputeKernel {
 								return;
 
 							}
-
-							// il passo ha superato la parete: il cammino attraversa, attenuato da
-							// quel che il mezzo ha assorbito per strada. E' QUI che nasce il bordo
-							// rosso — una traversata lunga tiene il rosso e perde il blu.
-							walkTransmittance = segmentWeight;
 
 						}
 
@@ -647,15 +537,7 @@ export class MaterialKernel extends ComputeKernel {
 						// colore dello scatter perche' e' lui che LogicKernel moltiplichera'.
 						scatterRec.color = scatterRec.color / max( materialInfo.color, vec3f( 1e-4 ) );
 
-						// il cammino si ricorda da dove e' entrato: e' il verso in cui la guida
-						// pende. Il PRIMO segmento pero' e' classico — la sua direzione e' quella
-						// specchiata qui sopra, non una che la fase ha estratto.
-						rayDataStorage[ index ].subsurfaceNormal = faceNormal;
 						rayDataStorage[ index ].subsurfaceSteps = 0u;
-						rayDataStorage[ index ].subsurfaceStretch = 1.0;
-						rayDataStorage[ index ].subsurfacePdfFactor = 0.0;
-						rayDataStorage[ index ].subsurfaceGuided = 0u;
-						rayDataStorage[ index ].subsurfaceOpposite = 0.0;
 
 					}
 					rayDataStorage[ index ].insideMaterial = insideNext;
