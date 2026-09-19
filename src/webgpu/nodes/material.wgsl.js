@@ -201,20 +201,32 @@ export const sampleHenyeyGreensteinFunc = wgslFn( /* wgsl */ `
 
 // ── SUBSURFACE: from what the user writes to what the walk wants ──
 //
-// The user writes a diffusion radius - how far the light re-emerges - and a surface
-// albedo. The walk wants a mean free path and a single scattering albedo, which are
-// much shorter and much higher. The conversion is the Christensen-Burley fit, taken
-// from Cycles' subsurface_random_walk_coefficients; the 0.2 floor is theirs too,
-// and it is there because the fit makes a visible step below it.
+// The user writes a surface albedo and a diffusion radius. The walk wants a SINGLE
+// SCATTERING albedo, which is much higher, and an extinction. The inversion is
+// d'Eon's "A Hitchhiker's Guide to Multiple Scattering" eq 53.7, which is the one
+// Cycles uses for its current walk (subsurface_random_walk_remap, the van de Hulst
+// branch) - read in the source, after a first version written from memory got both
+// of these wrong and cost an afternoon of debugging something else.
+//
+// The extinction is simply the reciprocal of the radius. An earlier version divided
+// it by a fitted factor, which belongs to the Christensen-Burley DIFFUSION profile
+// and not here: it shortened the mean free path by up to three times on dark
+// colours, so a value copied from Blender meant something else.
 //
 // Two functions and not one because the two are wanted in different places: the
 // albedo also picks the channel and drives the guiding, the extinction only the
 // distances.
 export const subsurfaceAlphaFunc = wgslFn( /* wgsl */ `
 
-	fn subsurfaceAlpha( color: vec3f ) -> vec3f {
+	fn subsurfaceAlpha( color: vec3f, anisotropy: f32 ) -> vec3f {
 
-		return max( vec3f( 1.0 ) - exp( color * ( - 5.09406 + color * ( 2.61188 - color * 4.31805 ) ) ), vec3f( 0.2 ) );
+		let root = sqrt( 9.59217 + 41.6808 * color + 17.7126 * color * color );
+		let s = 4.20863 * color - root + 4.09712;
+		let sSq = s * s;
+		return clamp(
+			( vec3f( 1.0 ) - sSq ) / max( vec3f( 1.0 ) - anisotropy * sSq, vec3f( 1e-6 ) ),
+			vec3f( 0.0 ), vec3f( 0.999999 ),
+		);
 
 	}
 
@@ -222,10 +234,9 @@ export const subsurfaceAlphaFunc = wgslFn( /* wgsl */ `
 
 export const subsurfaceSigmaFunc = wgslFn( /* wgsl */ `
 
-	fn subsurfaceSigma( color: vec3f, radius: vec3f ) -> vec3f {
+	fn subsurfaceSigma( radius: vec3f ) -> vec3f {
 
-		let shrink = 1.9 - color + 3.5 * ( color - 0.8 ) * ( color - 0.8 );
-		return 1.0 / max( radius * shrink, vec3f( 1e-6 ) );
+		return 1.0 / max( radius, vec3f( 1e-16 ) );
 
 	}
 

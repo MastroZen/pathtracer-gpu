@@ -6,7 +6,7 @@ import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
-import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, henyeyGreensteinPdfFunc, directionFromCosineFunc, diffusionLengthDwivediFunc, samplePhaseDwivediFunc, evalPhaseDwivediFunc } from '../../nodes/material.wgsl.js';
+import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc, henyeyGreensteinPdfFunc, directionFromCosineFunc, diffusionLengthDwivediFunc, samplePhaseDwivediFunc, evalPhaseDwivediFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 
@@ -216,16 +216,13 @@ export class MaterialKernel extends ComputeKernel {
 							// vuole altre due cose: il libero cammino medio e l'albedo di singolo
 							// scattering, che sono molto piu' corti e molto piu' alti.
 							//
-							// La conversione e' la fit di Christensen-Burley, presa da Cycles
-							// (subsurface_random_walk_coefficients). Senza, raggio e colore non
-							// vogliono dire quel che vogliono dire di la': il risultato viene piu'
-							// scuro, piu' rumoroso, e un valore copiato da Blender non torna.
-							let surfaceAlbedo = medium.color;
-							// il pavimento a 0,2 e' di Cycles: sotto, la fit fa uno scalino visibile
-							let alpha = max( vec3f( 1.0 ) - exp( surfaceAlbedo * ( - 5.09406 + surfaceAlbedo * ( 2.61188 - surfaceAlbedo * 4.31805 ) ) ), vec3f( 0.2 ) );
-							let shrink = 1.9 - surfaceAlbedo + 3.5 * ( surfaceAlbedo - 0.8 ) * ( surfaceAlbedo - 0.8 );
-							let radius = max( medium.subsurfaceRadius * shrink, vec3f( 1e-6 ) );
-							let sigma = 1.0 / radius;
+							// La conversione sta in subsurfaceAlpha / subsurfaceSigma, ed e' quella
+							// di Cycles LETTA NEL SORGENTE: la prima versione era scritta a memoria
+							// e sbagliava sia l'albedo (ignorava l'anisotropia, e aveva un pavimento
+							// che di la' non c'e') sia l'estinzione (un fattore di accorciamento che
+							// appartiene al profilo di diffusione, non al cammino).
+							let alpha = ${ subsurfaceAlphaFunc }( medium.color, medium.subsurfaceAnisotropy );
+							let sigma = ${ subsurfaceSigmaFunc }( medium.subsurfaceRadius );
 							// ── IL CANALE SI SORTEGGIA SU alpha * throughput ──
 							//
 							// E' volume_sample_channel di Cycles, letto nel sorgente: il canale che
@@ -639,6 +636,16 @@ export class MaterialKernel extends ComputeKernel {
 						scatterRec.direction = scatterRec.direction - 2.0 * dot( scatterRec.direction, faceNormal ) * faceNormal;
 						insideNext = i32( objectInfo.materialIndex );
 						enteredSubsurface = true;
+
+						// ── E IL COLORE SI TOGLIE, perche' il cammino lo rimettera' ──
+						//
+						// Il peso della closure che il cammino porta dentro contiene GIA' l'albedo:
+						// la BSDF appena campionata lo ha applicato. Dentro il volume lo rimette
+						// una volta per diffusione, quindi lasciarlo qui vuol dire applicarlo due
+						// volte e la materia esce troppo scura. Di la' e' una riga sola,
+						// throughput = safe_divide_color(throughput, albedo), e qui si fa sul
+						// colore dello scatter perche' e' lui che LogicKernel moltiplichera'.
+						scatterRec.color = scatterRec.color / max( materialInfo.color, vec3f( 1e-4 ) );
 
 						// il cammino si ricorda da dove e' entrato: e' il verso in cui la guida
 						// pende. Il PRIMO segmento pero' e' classico — la sua direzione e' quella
