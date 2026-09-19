@@ -199,6 +199,108 @@ export const sampleHenyeyGreensteinFunc = wgslFn( /* wgsl */ `
 
 `, [ getBasisFromNormalFunc ] );
 
+// ── SUBSURFACE: from what the user writes to what the walk wants ──
+//
+// The user writes a diffusion radius - how far the light re-emerges - and a surface
+// albedo. The walk wants a mean free path and a single scattering albedo, which are
+// much shorter and much higher. The conversion is the Christensen-Burley fit, taken
+// from Cycles' subsurface_random_walk_coefficients; the 0.2 floor is theirs too,
+// and it is there because the fit makes a visible step below it.
+//
+// Two functions and not one because the two are wanted in different places: the
+// albedo also picks the channel and drives the guiding, the extinction only the
+// distances.
+export const subsurfaceAlphaFunc = wgslFn( /* wgsl */ `
+
+	fn subsurfaceAlpha( color: vec3f ) -> vec3f {
+
+		return max( vec3f( 1.0 ) - exp( color * ( - 5.09406 + color * ( 2.61188 - color * 4.31805 ) ) ), vec3f( 0.2 ) );
+
+	}
+
+`, [] );
+
+export const subsurfaceSigmaFunc = wgslFn( /* wgsl */ `
+
+	fn subsurfaceSigma( color: vec3f, radius: vec3f ) -> vec3f {
+
+		let shrink = 1.9 - color + 3.5 * ( color - 0.8 ) * ( color - 0.8 );
+		return 1.0 / max( radius * shrink, vec3f( 1e-6 ) );
+
+	}
+
+`, [] );
+
+// The pdf of the Henyey-Greenstein phase function, per steradian. It is also the
+// phase VALUE, because the sampler draws proportionally to it - which is why the
+// guided weight below is a ratio of pdfs and nothing else.
+export const henyeyGreensteinPdfFunc = wgslFn( /* wgsl */ `
+
+	fn henyeyGreensteinPdf( cosTheta: f32, g: f32 ) -> f32 {
+
+		let denom = max( 1.0 + g * g - 2.0 * g * cosTheta, 1e-6 );
+		return ( 1.0 - g * g ) / ( 4.0 * PI * denom * sqrt( denom ) );
+
+	}
+
+`, [] );
+
+// A direction at a given angle from an axis, with the azimuth taken from "u".
+export const directionFromCosineFunc = wgslFn( /* wgsl */ `
+
+	fn directionFromCosine( axis: vec3f, cosTheta: f32, u: f32 ) -> vec3f {
+
+		let sinTheta = sqrt( max( 0.0, 1.0 - cosTheta * cosTheta ) );
+		let phi = 2.0 * PI * u;
+		let basis = getBasisFromNormal( axis );
+		return normalize( basis * vec3f( sinTheta * cos( phi ), sinTheta * sin( phi ), cosTheta ) );
+
+	}
+
+`, [ getBasisFromNormalFunc ] );
+
+// ── DWIVEDI GUIDING ──
+//
+// A walk in a dense medium wanders, and most of its steps go nowhere near the exit:
+// that is where the noise of subsurface comes from. Dwivedi's zero-variance walk
+// leans the direction toward the interface the path came in through AND stretches
+// the distance along it - the two are ONE mechanism, and guiding the direction
+// without stretching the distance is measurably WORSE (19.98 -> 23.43 on a user's
+// scene). "diffusionLength" is v in the paper, and it depends only on the single
+// scattering albedo: the closer that is to one, the more the walk needs the help.
+export const diffusionLengthDwivediFunc = wgslFn( /* wgsl */ `
+
+	fn diffusionLengthDwivedi( albedo: f32 ) -> f32 {
+
+		let a = clamp( albedo, 0.01, 0.9999 );
+		let e = 2.44294 - 0.0215813 * a + 0.578637 / a;
+		return 1.0 / sqrt( max( 1.0 - pow( a, e ), 1e-7 ) );
+
+	}
+
+`, [] );
+
+export const samplePhaseDwivediFunc = wgslFn( /* wgsl */ `
+
+	fn samplePhaseDwivedi( v: f32, phaseLog: f32, u: f32 ) -> f32 {
+
+		return v - ( v + 1.0 ) * exp( - u * phaseLog );
+
+	}
+
+`, [] );
+
+// per steradian: the 1/2pi of the azimuth is folded in here
+export const evalPhaseDwivediFunc = wgslFn( /* wgsl */ `
+
+	fn evalPhaseDwivedi( v: f32, phaseLog: f32, cosTheta: f32 ) -> f32 {
+
+		return ( 1.0 / ( 2.0 * PI ) ) / max( ( v - cosTheta ) * phaseLog, 1e-6 );
+
+	}
+
+`, [] );
+
 export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) => wgslFn( /* wgsl */ `
 
 	fn getSurfaceRecord(
