@@ -183,7 +183,58 @@ export const materialStruct = new StructTypeNode( {
 	// The Henyey-Greenstein g: 0 scatters in every direction, positive keeps going
 	// forward. Skin is around 0.8 in Blender.
 	subsurfaceAnisotropy: 'float',
-	// total size = 284
+
+	// offset 284: i PELI.
+	//
+	// Stanno sul materiale e non altrove perche' il kernel legge di qui: il
+	// pacchetto della peluria e' legato ai kernel di tracciamento, non a quello dei
+	// materiali. Il colore invece NON e' qui — e' `color`, lo stesso della
+	// superficie, che per un pelo diventa assorbimento.
+	//
+	// Le due ruvidita' sono separate come di la': quella lungo la ciocca e quella
+	// attorno alla sezione fanno due cose diverse, e una sola non basta.
+	hairRoughness: 'float',
+	hairRadialRoughness: 'float',
+	// l'inclinazione della cuticola, in RADIANTI: e' lei a staccare il secondo
+	// riflesso dal primo
+	hairTilt: 'float',
+	// quanto varia da una ciocca all'altra, 0..1
+	hairRandomColor: 'float',
+	hairRandomRoughness: 'float',
+	// i due PIGMENTI, che si sommano al colore: eumelanina e feomelanina, come
+	// dentro il modo a pigmenti di Cycles
+	hairMelanin: 'float',
+	hairRedness: 'float',
+	// la vernice (quanto stringere il solo riflesso primario) e l'indice di
+	// rifrazione della fibra
+	hairCoat: 'float',
+	hairIor: 'float',
+
+	// ── E TRE PAROLE DI RIEMPIMENTO, che NON sono pignoleria ──
+	//
+	// La struct contiene dei `vec3`, quindi il suo passo e' allineato a quattro
+	// float: `getLength()` risponde 296 anche se i campi sono 293. Chi scrive il
+	// buffer avanza di un campo per volta, quindi senza queste tre ogni materiale
+	// dopo il primo viene LETTO spostato di tre parole — e non e' un errore, e'
+	// una scena intera coi materiali sbagliati.
+	//
+	// Misurato: aggiungendo i nove campi dei peli e fermandosi a 293, una scena
+	// SENZA un pelo e' passata da 77 a 31 di luminanza media. Il totale va tenuto
+	// multiplo di quattro, e il controllo qui sotto lo pretende.
+	// quale MODELLO: 0 e' Chiang, 1 e' Huang. Un float perche' il record e' un
+	// buffer di float, e il numero e' quello che il ponte ha gia' tradotto.
+	hairModel: 'float',
+	// il rapporto fra asse minore e maggiore della sezione: lo usa il solo Huang
+	hairAspect: 'float',
+	// e il RIEMPIMENTO che porta il record al passo della struct: i `vec3` la
+	// allineano a quattro float, quindi il totale va tenuto multiplo di quattro.
+	// Il controllo a runtime nel writer conta le parole scritte e le confronta.
+	_hairAlignment0: 'float',
+	_hairAlignment1: 'float',
+	_hairAlignment2: 'float',
+	_hairAlignment3: 'float',
+	_hairAlignment4: 'float',
+	// total size = 300
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

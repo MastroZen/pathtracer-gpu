@@ -21,6 +21,12 @@ export const RNG_INDEX_SUBSURFACE = 16;
 // advanced by the step count in rngInit - reusing an index without that would draw the
 // same number at every step and the walk would march in a straight line.
 export const RNG_INDEX_SUBSURFACE_WALK = 17;
+// I PELI: tre dimensioni, e sono TRE di fila perche' il campionamento del BSDF
+// ne chiede tre insieme — il lobo, l'angolo attorno alla fibra, quello lungo di
+// essa. Riusare quelle dello scatter di superficie sarebbe dare lo stesso numero
+// a due estrazioni diverse dentro lo stesso colpo.
+export const RNG_INDEX_HAIR = 18;
+
 export const RNG_INDEX_ALPHA_TEST = 50;
 import { contextProxyFn } from 'three-mesh-bvh/webgpu';
 import * as sobol from './rand/sobol.wgsl.js';

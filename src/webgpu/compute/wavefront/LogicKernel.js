@@ -182,6 +182,10 @@ export class LogicKernel extends ComputeKernel {
 						rayDataStorage[ index ].normal = hitResult.normal;
 						rayDataStorage[ index ].side = hitResult.side;
 						rayDataStorage[ index ].indices = hitResult.indices;
+						// senza questa riga il colpo su un pelo arriva a chi ombreggia
+						// travestito da triangolo, e "indices" diventa tre indici di vertice
+						// che nessuno ha scritto
+						rayDataStorage[ index ].isCurve = hitResult.isCurve;
 						rayDataStorage[ index ].objectIndex = hitResult.objectIndex;
 						rayDataStorage[ index ].dist = hitResult.dist;
 

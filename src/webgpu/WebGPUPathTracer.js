@@ -213,6 +213,42 @@ export class WebGPUPathTracer {
 	}
 
 	/**
+	 * Lega un manto di peli alla scena, o lo toglie passando null.
+	 *
+	 * Il pacchetto arriva GIA' FATTO: l'albero delle curve, i punti e i segmenti in un
+	 * "Uint32Array" solo. Chi lo genera sta fuori dal tracciatore, che non sa niente di
+	 * come si semina o si pettina una pelliccia.
+	 *
+	 * I peli vivono in coordinate di MONDO e nominano un oggetto della scena per il
+	 * materiale: muovere quell'oggetto NON muove il manto, che va rigenerato.
+	 *
+	 * @param {Uint32Array|null} packed
+	 * @param {number} [objectIndex=0]
+	 */
+	setFur( packed ) {
+
+		this._pathTracer.setFur( packed );
+		this._pathTracer.reset();
+
+	}
+
+	/**
+	 * Lo slot che un oggetto della scena occupa nell'elenco delle trasformate.
+	 *
+	 * Serve a chi costruisce un manto: ogni segmento porta l'oggetto che gli presta
+	 * il materiale, e quell'indice lo assegna la deduplicazione del BVH — non
+	 * l'ordine della scena. Si chiede DOPO `setScene`, e di nuovo a ogni `setScene`.
+	 *
+	 * @param {Object3D} object
+	 * @returns {number} lo slot, o -1 se quell'oggetto non e' nel BVH.
+	 */
+	getObjectSlot( object ) {
+
+		return this._bvhData.getObjectSlot( object );
+
+	}
+
+	/**
 	 * Stops accumulating once every pixel reaches this many samples. A denoiser only runs once the
 	 * render has stopped, so it has no effect while this is `0`.
 	 * @type {number}

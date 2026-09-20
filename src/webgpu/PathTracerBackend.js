@@ -1,6 +1,8 @@
 import { ColorManagement, FloatType, RGBAFormat } from 'three';
 import { RedIntegerFormat, StorageTexture, UnsignedIntType } from 'three/webgpu';
+import { StorageBufferAttribute } from 'three/webgpu';
 import { ZeroOutKernel } from './compute/ZeroOutKernel.js';
+import { EMPTY_HAIR_DATA } from './nodes/hair.wgsl.js';
 import { SUBSURFACE_MAX_STEPS } from './nodes/material.wgsl.js';
 
 export class PathTracerBackend {
@@ -19,6 +21,17 @@ export class PathTracerBackend {
 		// dropped. It is the quality knob of the random walk - a dense medium needs many
 		// short steps to reach the other side, and stopping early loses that light.
 		this.maxSubsurfaceSteps = SUBSURFACE_MAX_STEPS;
+
+		// ── LA PELURIA ──
+		//
+		// Un pacchetto solo, gia' impacchettato da chi lo genera (src/hair/curvePack.ts
+		// dell'applicazione): albero, punti e segmenti in un "Uint32Array". Il tracer non
+		// lo costruisce e non lo interpreta — lo lega e basta, ed e' il motivo per cui il
+		// generatore puo' stare fuori da qui.
+		//
+		// Nasce VUOTO: uno storage buffer va sempre legato, e otto parole a zero dicono
+		// alla traversata «nessun nodo».
+		this.hairAttribute = new StorageBufferAttribute( EMPTY_HAIR_DATA, 1 );
 		this.lowResMode = false;
 
 		// stop taking samples once a pixel reaches this count. zero means no limit.
@@ -56,6 +69,20 @@ export class PathTracerBackend {
 	}
 
 	setBVHData( data ) {
+
+	}
+
+	/**
+	 * Lega un manto di peli al tracciatore.
+	 *
+	 * Un pacchetto solo per tutta la scena: il kernel lega un buffer, e ogni
+	 * segmento dice a quale oggetto appartiene.
+	 *
+	 * @param {Uint32Array|null} packed - il pacchetto delle curve, o null per toglierlo.
+	 */
+	setFur( packed ) {
+
+		this.hairAttribute = new StorageBufferAttribute( packed === null ? EMPTY_HAIR_DATA : packed, 1 );
 
 	}
 

@@ -467,6 +467,34 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 	}
 
+
+	/**
+	 * Lo slot che un oggetto occupa nell'elenco delle trasformate, o -1 se non c'e'.
+	 *
+	 * Serve a chi deve NOMINARE un oggetto dall'esterno — la peluria gli prende il
+	 * materiale — e non puo' indovinare l'indice: lo assegna la deduplicazione del
+	 * BVH, che segue l'ordine dei suoi primitivi e non quello della scena.
+	 *
+	 * Si ricalcola a ogni chiamata (la mappa non si conserva) quindi non e' per il
+	 * ciclo di disegno: si chiede quando la scena cambia.
+	 *
+	 * @param {import('three').Object3D} object
+	 * @returns {number}
+	 */
+	getObjectSlot( object ) {
+
+		if ( ! this.bvh ) return - 1;
+
+		for ( const info of this._getTransformMap( this.bvh ).values() ) {
+
+			if ( info.object === object ) return info.slot;
+
+		}
+
+		return - 1;
+
+	}
+
 	updateMaterials() {
 
 		this.updateMaterialsMap();
@@ -598,9 +626,23 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		const floatArray = new Float32Array( materialBufferLength * this.structs.material.getLength() );
 		const intArray = new Int32Array( floatArray.buffer );
 
+		// ── CHI SCRIVE DEVE SCRIVERE ESATTAMENTE UN RECORD ──
+		//
+		// La struct ha dei `vec3`, quindi il suo passo e' allineato a quattro float e
+		// `getLength()` puo' rispondere piu' dei campi dichiarati. Un record scritto
+		// corto non da' errore: sposta OGNI materiale dopo il primo, e la scena esce
+		// coi materiali di qualcun altro.
+		//
+		// Misurato una volta: nove campi aggiunti, record a 293 contro un passo di
+		// 296, e una scena senza peli passata da 77 a 31 di luminanza media. Da qui
+		// in poi si conta.
+		const recordLength = this.structs.material.getLength();
+
 		// TODO: make features work
 		// features.reset();
 		for ( let i = 0, l = materials.length; i < l; i ++ ) {
+
+			const recordStart = index;
 
 			const m = materials[ i ];
 
@@ -911,6 +953,39 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			floatArray[ index ++ ] = subsurfaceRadius ? subsurfaceRadius.g : 0.0;
 			floatArray[ index ++ ] = subsurfaceRadius ? subsurfaceRadius.b : 0.0;
 			floatArray[ index ++ ] = getField( m, 'subsurfaceAnisotropy', 0.0 );
+
+			// offset 284: i peli. I default sono quelli del Principled Hair di
+			// Blender — ruvidita' 0,3 e 0,3, inclinazione 2 gradi — cosi' un materiale
+			// che non li dichiara veste comunque un pelo sensato.
+			floatArray[ index ++ ] = getField( m, 'hairRoughness', 0.3 );
+			floatArray[ index ++ ] = getField( m, 'hairRadialRoughness', 0.3 );
+			floatArray[ index ++ ] = getField( m, 'hairTilt', 0.034906585 );
+			floatArray[ index ++ ] = getField( m, 'hairRandomColor', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'hairRandomRoughness', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'hairMelanin', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'hairRedness', 1.0 );
+			floatArray[ index ++ ] = getField( m, 'hairCoat', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'hairIor', 1.55 );
+
+			floatArray[ index ++ ] = getField( m, 'hairModel', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'hairAspect', 0.85 );
+
+			// il riempimento che porta il record al passo della struct: vedi structs.wgsl.js
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
+
+			if ( index - recordStart !== recordLength ) {
+
+				throw new Error(
+					`PathtracerBVHComputeData: il record del materiale e' ${ index - recordStart } parole ` +
+					`invece di ${ recordLength }. Aggiungendo un campo alla struct va aggiunta anche la ` +
+					`sua scrittura qui, e il totale va tenuto multiplo di quattro.`
+				);
+
+			}
 
 		}
 

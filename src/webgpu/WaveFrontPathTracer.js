@@ -245,6 +245,25 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
+	setFur( packed ) {
+
+		super.setFur( packed );
+
+		// ── IL BUFFER E' UN OGGETTO NUOVO, quindi il bind group va RIFATTO ──
+		//
+		// Assegnarlo e basta lascia i kernel legati a quello di prima, e l'immagine
+		// non cambia di un pixel: e' lo stesso motivo per cui la coda dei pixel qui
+		// sotto alza "needsUpdate" quando si allarga.
+		//
+		// Il difetto era MUTO nel modo peggiore — peluria cotta, ingombro giusto,
+		// zero errori, immagine identica — e a separarlo da «i peli nascono nel
+		// posto sbagliato» e' stata un'iniezione: «se il pacchetto arriva, fai
+		// sparire tutta la scena». Non spariva niente.
+		this.traceRayKernel.needsUpdate = true;
+		this.traceShadowRayKernel.needsUpdate = true;
+
+	}
+
 	_updatePixelQueue( width, height, rayCount ) {
 
 		const overflowCount = Math.max( 0, width * height - rayCount );
@@ -372,6 +391,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 				traceRayKernel.rayQueue = rayQueue;
 				traceRayKernel.rayIntersectionsStorage = rayIntersectionsStorage;
+				traceRayKernel.hairData = this.hairAttribute;
 				renderer.compute( traceRayKernel.kernel, rayDispatchConverter.outputDispatch );
 
 				shadowDispatchConverter.queue = shadowRayQueue;
@@ -379,6 +399,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 				traceShadowRayKernel.shadowRayQueue = shadowRayQueue;
 				traceShadowRayKernel.shadowRayIntersectionsStorage = shadowRayIntersectionsStorage;
+				traceShadowRayKernel.hairData = this.hairAttribute;
 				renderer.compute( traceShadowRayKernel.kernel, shadowDispatchConverter.outputDispatch );
 
 			}

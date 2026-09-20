@@ -5,34 +5,40 @@
 // riferimento, e `checks/e2e/_sondaCurveWgsl.mjs` li confronta: importa questo
 // file da node_modules e quello da src/, e pretende gli stessi numeri.
 //
-// ── PERCHE' ESISTE DUE VOLTE ──
+// ── UNA FUNZIONE PER BLOCCO, ED E' UN VINCOLO DI TSL ──
 //
-// Non si puo' condividere codice fra TypeScript e WGSL, quindi si condivide la
-// RISPOSTA: stessi raggi, stesso manto, stessi numeri. Una trascrizione sbagliata
-// non lancia — fa sparire dei peli, o li mette un millimetro piu' in la' — e
-// `checks/e2e/_sondaCurveWgsl.mjs` e' il solo modo di vederlo senza guardare una
-// pelliccia e sperare.
+// `wgslFn` analizza UNA funzione per volta: un testo con dieci funzioni e una
+// struct non si puo' anteprendere a un kernel — risponde «Function is not a WGSL
+// code» e il tracer muore in silenzio, che e' il modo in cui questo pezzo
+// fallisce. Quindi ogni funzione e' un nodo suo, con le sue dipendenze
+// dichiarate, come fa `material.wgsl.js`.
 //
-// Quindi questo file si legge ACCANTO a `curveIntersect.ts` e `curveQuery.ts`, e
-// ogni riga di la' ha la sua riga qui. Quando una delle due cambia, cambiano
-// tutte e due: e' il prezzo del doppio, e la sonda e' quel che lo rende pagabile.
+// Le SORGENTI restano esportate accanto ai nodi: le sonde compilano WGSL a mano,
+// senza TSL, e devono poter prendere lo stesso identico testo. Una fonte sola,
+// due consumatori.
 //
-// ── UN BUFFER SOLO, E ARRIVA PER PUNTATORE ──
+// ── IL DATO ARRIVA PER PUNTATORE ──
 //
-// WebGPU garantisce otto storage buffer per stage, e il kernel di tracciamento ne
-// usa gia' sei: due suoi e quattro del BVH dei triangoli. La peluria ci sta in
-// UNO — `packCurves` mette tutto in un `array<u32>` con gli offset in testa, e le
-// funzioni di lettura qui sotto lo aprono. I float ci entrano per
-// REINTERPRETAZIONE, e i `bitcast` stanno dentro quelle funzioni: la traversata
-// resta leggibile come quando i buffer erano sei.
+// Nel kernel il buffer entra per interpolazione e il suo nome lo decide TSL,
+// quindi un testo che lo nomina si lega a un nome che non controlla. WGSL ammette
+// i puntatori nello spazio storage: chi chiama scrive `hairQuery( &buffer, ... )`,
+// e il testo non presume niente.
 //
-// E si passa come PUNTATORE e non per nome: nel kernel il buffer arriva per
-// interpolazione e il suo nome lo decide TSL, quindi un testo che lo nomina si
-// lega a un nome che non controlla. WGSL ammette i puntatori nello spazio storage,
-// e chi chiama scrive `hairQuery( &buffer, ... )`.
+// Il pacchetto, e l'aritmetica dei suoi offset, stanno in `src/hair/curvePack.ts`.
+import { wgslFn } from 'three/tsl';
+import { StructTypeNode } from 'three/webgpu';
 
-/** Il colpo, in WGSL. Gli stessi campi di `CurveQueryHit`, piu' `didHit`. */
-export const hairHitStruct = /* wgsl */`
+/** Il colpo su un pelo. Gli stessi campi di `CurveQueryHit`, piu' `didHit`. */
+export const hairHitStruct = new StructTypeNode( {
+	didHit: 'bool',
+	dist: 'float',
+	normal: 'vec3f',
+	u: 'float',
+	segment: 'uint',
+}, 'HairHit' );
+
+/** Lo stesso, come testo: le sonde non hanno TSL e dichiarano la struct a mano. */
+export const HAIR_HIT_SOURCE = /* wgsl */ `
 struct HairHit {
 	didHit: bool,
 	dist: f32,
@@ -43,13 +49,137 @@ struct HairHit {
 `;
 
 /**
- * Un raggio contro un segmento: il cono raccordato da due calotte.
+ * Il pacchetto VUOTO: otto parole a zero.
  *
- * Trascrizione di `intersectCurveSegment`. Le due differenze di FORMA — un
- * risultato per valore invece di `null`, e le guardie scritte a mano invece dei
- * ritorni anticipati — sono obbligate dal linguaggio, non scelte.
+ * Uno storage buffer va SEMPRE legato, anche quando nella scena non c'e' un pelo.
+ * Otto parole e non una: la traversata legge l'intestazione, e leggere fuori da un
+ * array non e' un errore che qualcuno segnala — e' un numero che capita, e con un
+ * numero di nodi che capita la traversata gira dentro un albero che non esiste.
  */
-export const hairIntersectWgsl = /* wgsl */`
+export const EMPTY_HAIR_DATA = new Uint32Array( 8 );
+
+// ── LE LETTURE DAL PACCHETTO ──
+//
+// L'intestazione sta nelle prime otto parole e dice dove comincia ogni sezione.
+// Gli offset si LEGGONO e non si ricalcolano: ricalcolarli vorrebbe dire ripetere
+// qui l'aritmetica di curvePack.ts, e due conti che devono tornare uguali sono due
+// conti che prima o poi divergono.
+export const HAIR_WORD_SOURCE = /* wgsl */ `
+fn hairWord( data: ptr<storage, array<u32>, read>, i: u32 ) -> u32 { return (*data)[ i ]; }
+`;
+export const hairWordFn = wgslFn( HAIR_WORD_SOURCE, [  ] );
+
+export const HAIR_NODE_COUNT_SOURCE = /* wgsl */ `
+fn hairNodeCount( data: ptr<storage, array<u32>, read> ) -> u32 { return hairWord( data, 5u ); }
+`;
+export const hairNodeCountFn = wgslFn( HAIR_NODE_COUNT_SOURCE, [ hairWordFn ] );
+
+export const HAIR_BOUNDS_MIN_SOURCE = /* wgsl */ `
+fn hairBoundsMin( data: ptr<storage, array<u32>, read>, node: u32 ) -> vec3f {
+
+	let at = hairWord( data, 0u ) + node * 6u;
+	return vec3f(
+		bitcast<f32>( hairWord( data, at ) ),
+		bitcast<f32>( hairWord( data, at + 1u ) ),
+		bitcast<f32>( hairWord( data, at + 2u ) ),
+	);
+
+}
+`;
+export const hairBoundsMinFn = wgslFn( HAIR_BOUNDS_MIN_SOURCE, [ hairWordFn ] );
+
+export const HAIR_BOUNDS_MAX_SOURCE = /* wgsl */ `
+fn hairBoundsMax( data: ptr<storage, array<u32>, read>, node: u32 ) -> vec3f {
+
+	let at = hairWord( data, 0u ) + node * 6u;
+	return vec3f(
+		bitcast<f32>( hairWord( data, at + 3u ) ),
+		bitcast<f32>( hairWord( data, at + 4u ) ),
+		bitcast<f32>( hairWord( data, at + 5u ) ),
+	);
+
+}
+`;
+export const hairBoundsMaxFn = wgslFn( HAIR_BOUNDS_MAX_SOURCE, [ hairWordFn ] );
+
+export const HAIR_NODE_FIELD_SOURCE = /* wgsl */ `
+fn hairNodeField( data: ptr<storage, array<u32>, read>, node: u32, field: u32 ) -> u32 {
+
+	return hairWord( data, hairWord( data, 1u ) + node * 4u + field );
+
+}
+`;
+export const hairNodeFieldFn = wgslFn( HAIR_NODE_FIELD_SOURCE, [ hairWordFn ] );
+
+export const HAIR_ORDER_AT_SOURCE = /* wgsl */ `
+fn hairOrderAt( data: ptr<storage, array<u32>, read>, i: u32 ) -> u32 { return hairWord( data, hairWord( data, 2u ) + i ); }
+`;
+export const hairOrderAtFn = wgslFn( HAIR_ORDER_AT_SOURCE, [ hairWordFn ] );
+
+/** Il punto porta il suo spessore nella quarta componente: una lettura invece di due. */
+export const HAIR_POINT_AT_SOURCE = /* wgsl */ `
+fn hairPointAt( data: ptr<storage, array<u32>, read>, i: u32 ) -> vec4f {
+
+	let at = hairWord( data, 3u ) + i * 4u;
+	return vec4f(
+		bitcast<f32>( hairWord( data, at ) ),
+		bitcast<f32>( hairWord( data, at + 1u ) ),
+		bitcast<f32>( hairWord( data, at + 2u ) ),
+		bitcast<f32>( hairWord( data, at + 3u ) ),
+	);
+
+}
+`;
+export const hairPointAtFn = wgslFn( HAIR_POINT_AT_SOURCE, [ hairWordFn ] );
+
+export const HAIR_SEGMENT_ENDS_SOURCE = /* wgsl */ `
+fn hairSegmentEnds( data: ptr<storage, array<u32>, read>, s: u32 ) -> vec2u {
+
+	let at = hairWord( data, 4u ) + s * 6u;
+	return vec2u( hairWord( data, at ), hairWord( data, at + 1u ) );
+
+}
+`;
+export const hairSegmentEndsFn = wgslFn( HAIR_SEGMENT_ENDS_SOURCE, [ hairWordFn ] );
+
+/** Dove comincia e finisce il segmento lungo la sua CIOCCA. */
+export const HAIR_SEGMENT_RANGE_SOURCE = /* wgsl */ `
+fn hairSegmentRange( data: ptr<storage, array<u32>, read>, s: u32 ) -> vec2f {
+
+	let at = hairWord( data, 4u ) + s * 6u;
+	return vec2f( bitcast<f32>( hairWord( data, at + 2u ) ), bitcast<f32>( hairWord( data, at + 3u ) ) );
+
+}
+`;
+export const hairSegmentRangeFn = wgslFn( HAIR_SEGMENT_RANGE_SOURCE, [ hairWordFn ] );
+
+export const HAIR_BOX_HIT_SOURCE = /* wgsl */ `
+fn hairBoxHit( data: ptr<storage, array<u32>, read>, node: u32, origin: vec3f, dir: vec3f, maxDist: f32 ) -> bool {
+
+	let lo = hairBoundsMin( data, node );
+	let hi = hairBoundsMax( data, node );
+	var near = 0.0;
+	var far = maxDist;
+	for ( var k = 0u; k < 3u; k = k + 1u ) {
+
+		// la divisione per una componente nulla da' infinito col segno giusto, e i
+		// confronti sotto lo reggono
+		let inv = 1.0 / dir[ k ];
+		var a = ( lo[ k ] - origin[ k ] ) * inv;
+		var b = ( hi[ k ] - origin[ k ] ) * inv;
+		if ( a > b ) { let swap = a; a = b; b = swap; }
+		if ( a > near ) { near = a; }
+		if ( b < far ) { far = b; }
+		if ( far < near ) { return false; }
+
+	}
+	return true;
+
+}
+`;
+export const hairBoxHitFn = wgslFn( HAIR_BOX_HIT_SOURCE, [ hairBoundsMinFn, hairBoundsMaxFn ] );
+
+export const HAIR_INTERSECT_SEGMENT_SOURCE = /* wgsl */ `
 fn hairIntersectSegment(
 	origin: vec3f, dir: vec3f,
 	p0: vec3f, r0: f32,
@@ -161,109 +291,61 @@ fn hairIntersectSegment(
 
 }
 `;
+export const hairIntersectSegmentFn = wgslFn( HAIR_INTERSECT_SEGMENT_SOURCE, [ hairHitStruct ] );
 
 /**
- * La traversata: trascrizione di `queryCurves`.
+ * La direzione della FIBRA nel segmento.
  *
- * La pila e' un `array` di dimensione fissa perche' sulla GPU non si alloca — ed
- * e' anche la ragione per cui la versione TypeScript ne ha una uguale invece di
- * ricorrere: le due devono traboccare allo stesso punto, o smettono di dare la
- * stessa risposta proprio nel caso raro.
+ * E' quel che un BSDF di pelo chiede al posto della normale: un pelo non ha una
+ * faccia, ha un asse, e i tre lobi (R, TT, TRT) si misurano rispetto a quello. Qui
+ * serve gia' prima: la tangente viaggia nel record del colpo perche' chi ombreggia
+ * NON puo' rileggere il pacchetto — il suo kernel ha finito gli storage buffer.
  */
-export const hairQueryWgsl = /* wgsl */`
-const HAIR_MAX_STACK: u32 = 32u;
+/**
+ * A quale OGGETTO della scena appartiene il segmento.
+ *
+ * I manti di piu' volumi stanno in UN buffer — il kernel ne lega uno — quindi
+ * l'indice non puo' essere un uniform: sarebbe uno per tutti, e il secondo volume
+ * si vestirebbe col materiale del primo.
+ */
+export const HAIR_SEGMENT_OBJECT_SOURCE = /* wgsl */ `
+fn hairSegmentObject( data: ptr<storage, array<u32>, read>, s: u32 ) -> u32 {
 
-// ── LE LETTURE DAL PACCHETTO ──
-//
-// L'intestazione sta nelle prime otto parole e dice dove comincia ogni sezione.
-// Gli offset si LEGGONO e non si ricalcolano: ricalcolarli vorrebbe dire ripetere
-// qui l'aritmetica di curvePack.ts, e due conti che devono tornare uguali sono due
-// conti che prima o poi divergono.
-fn hairWord( data: ptr<storage, array<u32>, read>, i: u32 ) -> u32 { return (*data)[ i ]; }
-
-fn hairNodeCount( data: ptr<storage, array<u32>, read> ) -> u32 { return hairWord( data, 5u ); }
-
-fn hairBoundsMin( data: ptr<storage, array<u32>, read>, node: u32 ) -> vec3f {
-
-	let at = hairWord( data, 0u ) + node * 6u;
-	return vec3f(
-		bitcast<f32>( hairWord( data, at ) ),
-		bitcast<f32>( hairWord( data, at + 1u ) ),
-		bitcast<f32>( hairWord( data, at + 2u ) ),
-	);
+	return hairWord( data, hairWord( data, 4u ) + s * 6u + 4u );
 
 }
+`;
+export const hairSegmentObjectFn = wgslFn( HAIR_SEGMENT_OBJECT_SOURCE, [ hairWordFn ] );
 
-fn hairBoundsMax( data: ptr<storage, array<u32>, read>, node: u32 ) -> vec3f {
+/**
+ * Il numero della CIOCCA, fra 0 e 1: l'attributo `random` del Principled Hair.
+ *
+ * Da lui vengono le variazioni di colore e ruvidita' da un pelo all'altro. Sta
+ * nel pacchetto perche' il kernel non ha nessun altro posto da cui prenderlo: la
+ * mappa segmento -> ciocca nel buffer non c'e'.
+ */
+export const HAIR_SEGMENT_RANDOM_SOURCE = /* wgsl */ `
+fn hairSegmentRandom( data: ptr<storage, array<u32>, read>, s: u32 ) -> f32 {
 
-	let at = hairWord( data, 0u ) + node * 6u;
-	return vec3f(
-		bitcast<f32>( hairWord( data, at + 3u ) ),
-		bitcast<f32>( hairWord( data, at + 4u ) ),
-		bitcast<f32>( hairWord( data, at + 5u ) ),
-	);
-
-}
-
-fn hairNodeField( data: ptr<storage, array<u32>, read>, node: u32, field: u32 ) -> u32 {
-
-	return hairWord( data, hairWord( data, 1u ) + node * 4u + field );
-
-}
-
-fn hairOrderAt( data: ptr<storage, array<u32>, read>, i: u32 ) -> u32 { return hairWord( data, hairWord( data, 2u ) + i ); }
-
-/** Il punto porta il suo spessore nella quarta componente: una lettura invece di due. */
-fn hairPointAt( data: ptr<storage, array<u32>, read>, i: u32 ) -> vec4f {
-
-	let at = hairWord( data, 3u ) + i * 4u;
-	return vec4f(
-		bitcast<f32>( hairWord( data, at ) ),
-		bitcast<f32>( hairWord( data, at + 1u ) ),
-		bitcast<f32>( hairWord( data, at + 2u ) ),
-		bitcast<f32>( hairWord( data, at + 3u ) ),
-	);
+	return bitcast<f32>( hairWord( data, hairWord( data, 4u ) + s * 6u + 5u ) );
 
 }
+`;
+export const hairSegmentRandomFn = wgslFn( HAIR_SEGMENT_RANDOM_SOURCE, [ hairWordFn ] );
 
-fn hairSegmentEnds( data: ptr<storage, array<u32>, read>, s: u32 ) -> vec2u {
+export const HAIR_TANGENT_SOURCE = /* wgsl */ `
+fn hairTangent( data: ptr<storage, array<u32>, read>, s: u32 ) -> vec3f {
 
-	let at = hairWord( data, 4u ) + s * 4u;
-	return vec2u( hairWord( data, at ), hairWord( data, at + 1u ) );
-
-}
-
-/** Dove comincia e finisce il segmento lungo la sua CIOCCA. */
-fn hairSegmentRange( data: ptr<storage, array<u32>, read>, s: u32 ) -> vec2f {
-
-	let at = hairWord( data, 4u ) + s * 4u;
-	return vec2f( bitcast<f32>( hairWord( data, at + 2u ) ), bitcast<f32>( hairWord( data, at + 3u ) ) );
+	let ends = hairSegmentEnds( data, s );
+	let a = hairPointAt( data, ends.x );
+	let b = hairPointAt( data, ends.y );
+	return normalize( b.xyz - a.xyz );
 
 }
+`;
+export const hairTangentFn = wgslFn( HAIR_TANGENT_SOURCE, [ hairSegmentEndsFn, hairPointAtFn ] );
 
-fn hairBoxHit( data: ptr<storage, array<u32>, read>, node: u32, origin: vec3f, dir: vec3f, maxDist: f32 ) -> bool {
-
-	let lo = hairBoundsMin( data, node );
-	let hi = hairBoundsMax( data, node );
-	var near = 0.0;
-	var far = maxDist;
-	for ( var k = 0u; k < 3u; k = k + 1u ) {
-
-		// la divisione per una componente nulla da' infinito col segno giusto, e i
-		// confronti sotto lo reggono
-		let inv = 1.0 / dir[ k ];
-		var a = ( lo[ k ] - origin[ k ] ) * inv;
-		var b = ( hi[ k ] - origin[ k ] ) * inv;
-		if ( a > b ) { let swap = a; a = b; b = swap; }
-		if ( a > near ) { near = a; }
-		if ( b < far ) { far = b; }
-		if ( far < near ) { return false; }
-
-	}
-	return true;
-
-}
-
+export const HAIR_QUERY_SOURCE = /* wgsl */ `
 fn hairQuery( data: ptr<storage, array<u32>, read>, origin: vec3f, dir: vec3f, maxDist: f32 ) -> HairHit {
 
 	var best: HairHit;
@@ -312,7 +394,11 @@ fn hairQuery( data: ptr<storage, array<u32>, read>, origin: vec3f, dir: vec3f, m
 
 			}
 
-		} else if ( depth + 2u <= HAIR_MAX_STACK ) {
+		} else if ( depth + 2u <= 32u ) {
+
+			// trentadue e' anche la taglia della pila qui sopra, ed e' scritto in
+			// cifre perche' una costante fuori dalle funzioni non ci sta: qui ogni
+			// blocco e' UNA funzione e basta
 
 			// i figli si visitano nell'ordine del raggio: trovare presto un colpo
 			// vicino fa potare il resto
@@ -335,14 +421,30 @@ fn hairQuery( data: ptr<storage, array<u32>, read>, origin: vec3f, dir: vec3f, m
 
 }
 `;
+export const hairQueryFn = wgslFn( HAIR_QUERY_SOURCE, [ hairNodeCountFn, hairBoxHitFn, hairNodeFieldFn, hairOrderAtFn, hairSegmentEndsFn, hairSegmentRangeFn, hairPointAtFn, hairIntersectSegmentFn, hairHitStruct ] );
 
 /**
- * Il pacchetto VUOTO: otto parole a zero.
+ * Tutte le sorgenti in fila, per chi compila WGSL a mano.
  *
- * Uno storage buffer va SEMPRE legato, anche quando nella scena non c'e' un pelo.
- * Otto parole e non una: la traversata legge l'intestazione, e leggere fuori da un
- * array a lunghezza nota non e' un errore che qualcuno segnala — e' un numero che
- * capita, e con un numero di nodi che capita la traversata gira dentro un albero
- * che non esiste.
+ * L'ordine e' quello delle dipendenze: WGSL vuole che una funzione sia dichiarata
+ * prima di essere chiamata, e sbagliarlo non da' un errore leggibile — da' un
+ * nome sconosciuto in una riga che sembra a posto.
  */
-export const EMPTY_HAIR_DATA = new Uint32Array( 8 );
+export const HAIR_SOURCE = [
+	HAIR_HIT_SOURCE,
+	HAIR_WORD_SOURCE,
+	HAIR_NODE_COUNT_SOURCE,
+	HAIR_BOUNDS_MIN_SOURCE,
+	HAIR_BOUNDS_MAX_SOURCE,
+	HAIR_NODE_FIELD_SOURCE,
+	HAIR_ORDER_AT_SOURCE,
+	HAIR_POINT_AT_SOURCE,
+	HAIR_SEGMENT_ENDS_SOURCE,
+	HAIR_SEGMENT_RANGE_SOURCE,
+	HAIR_BOX_HIT_SOURCE,
+	HAIR_INTERSECT_SEGMENT_SOURCE,
+	HAIR_SEGMENT_OBJECT_SOURCE,
+	HAIR_SEGMENT_RANDOM_SOURCE,
+	HAIR_TANGENT_SOURCE,
+	HAIR_QUERY_SOURCE,
+].join( '\n' );

@@ -3,12 +3,15 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { rngInit, rand1, rand2, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK } from '../../nodes/random.wgsl.js';
+import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
+import { hairSetupFn, hairSigmaFn, hairMelaninFn, hairEvalFn, hairScatterFn } from '../../nodes/hairBsdf.wgsl.js';
+import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '../../nodes/huangBsdf.wgsl.js';
+import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
 
 // Pure material evaluation and ray generation: terminated slots pull a recycled pixel and emit a
 // fresh camera ray; live slots evaluate the surface staged by LogicKernel, sample the bsdf, and
@@ -36,6 +39,18 @@ export class MaterialKernel extends ComputeKernel {
 			rayQueue: storage( new StorageBufferAttribute( 1, 1 ), rayQueueAtomicStruct ),
 			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), rayQueueAtomicStruct ),
 			pixelQueue: storage( new StorageBufferAttribute( 1, 1 ), pixelQueueStruct ),
+
+			// ── LA TABELLA DELL'ALBEDO DEL VETRO GGX, per il BSDF di Huang ──
+			//
+			// In un BUFFER e non dentro lo shader, ed e' misurato: come costante di
+			// modulo da 4096 float dentro il codice di Huang, FXC (il compilatore HLSL
+			// di D3D11) ci mette 21,8 secondi e poi fallisce con E_FAIL; con la stessa
+			// tabella in un buffer lo shader compila in 555 ms.
+			//
+			// Porta questo kernel a OTTO storage buffer, che e' il minimo che WebGPU
+			// garantisce: non ce ne sta un altro, e il prossimo dato di questa taglia
+			// dovra' entrare da un'altra parte.
+			ggxGlassTable: storage( new StorageBufferAttribute( GGX_GLASS_E, 1 ), 'float' ).toReadOnly(),
 
 			globalId: globalId,
 		};
@@ -327,9 +342,41 @@ export class MaterialKernel extends ComputeKernel {
 
 					// The surface point is sampled HERE and no longer below: the mix can read
 					// a MASK, and a mask wants the uv of the hit.
-					var vertexData = ${ sampleTrianglePointFn }( input.barycoord, input.indices );
-					vertexData.normal = normalize( transpose( objectInfo.inverseMatrixWorld ) * vertexData.normal );
-					vertexData.tangent = vec4f( ( objectInfo.matrixWorld * vec4f( vertexData.tangent.xyz, 0.0 ) ).xyz, vertexData.tangent.w );
+					//
+					// ── UN PELO NON HA VERTICI, e la superficie si costruisce a mano ──
+					//
+					// Un colpo su una curva porta una posizione, la normale del cono e la
+					// tangente della fibra: non ci sono tre vertici da interpolare. La
+					// chiamata si fa lo stesso, con baricentriche a zero, per avere una
+					// struttura del TIPO giusto — quali attributi contenga lo decide la scena
+					// (uv1, colori, tangenti: dipende dalle geometrie), quindi scriverla qui
+					// a mano vorrebbe dire nominare campi che possono non esistere.
+					//
+					// La peluria vive in coordinate di MONDO: e' cotta dalla mesh gia'
+					// trasformata, come un modificatore, quindi la posa dell'oggetto e' gia'
+					// dentro i suoi punti e non va riapplicata. Il costo dichiarato e' che
+					// muovere il volume vuole una ricottura.
+					let isCurve = input.isCurve == 1u;
+					var vertexData = ${ sampleTrianglePointFn }(
+						select( input.barycoord, vec3f( 0.0 ), isCurve ),
+						select( input.indices, vec3u( 0u ), isCurve ),
+					);
+					if ( isCurve ) {
+
+						vertexData.position = vec4f( input.origin + input.direction * input.dist, 1.0 );
+						vertexData.normal = vec4f( input.normal, 0.0 );
+						// la tangente arriva nel campo delle baricentriche, e il "w" e' il verso
+						// della bitangente: per una fibra ne vale uno qualsiasi purche' non zero,
+						// che e' il modo in cui chi ombreggia riconosce "tangente assente"
+						vertexData.tangent = vec4f( input.barycoord, 1.0 );
+						vertexData.color = vec4f( 1.0 );
+
+					} else {
+
+						vertexData.normal = normalize( transpose( objectInfo.inverseMatrixWorld ) * vertexData.normal );
+						vertexData.tangent = vec4f( ( objectInfo.matrixWorld * vec4f( vertexData.tangent.xyz, 0.0 ) ).xyz, vertexData.tangent.w );
+
+					}
 
 					// ── MIX SHADER ──
 					//
@@ -378,7 +425,7 @@ export class MaterialKernel extends ComputeKernel {
 					materialInfo.color *= objectInfo.color.rgb;
 					materialInfo.opacity *= objectInfo.color.a;
 
-					vertexData.position = objectInfo.matrixWorld * vertexData.position;
+					if ( ! isCurve ) { vertexData.position = objectInfo.matrixWorld * vertexData.position; }
 
 					// ── SUBSURFACE: the exit is a NEW diffuse point, not the hit it arrived at ──
 					//
@@ -491,8 +538,145 @@ export class MaterialKernel extends ComputeKernel {
 
 					}
 
+					// ── IL PELO HA UN BSDF SUO: i tre lobi di Chiang ──
+					//
+					// Una fibra non e' una superficie. La luce ci entra, ci gira dentro e ne
+					// esce, e i cammini che contano sono tre: R rimbalza sulla cuticola
+					// (riflesso primario, BIANCO), TT attraversa (il controluce, e porta il
+					// colore), TRT si riflette dentro e esce (il secondo riflesso, staccato
+					// dal primo dall'inclinazione delle scaglie). Il modello sta in
+					// nodes/hairBsdf.wgsl.js, col gemello provato in Node.
+					//
+					// I PARAMETRI VENGONO DAL MATERIALE, dove li ha messi il ponte
+					// dell'applicazione leggendoli dal VOLUME: il pacchetto della peluria e'
+					// legato ai kernel di tracciamento, non a questo, quindi di li' non si
+					// puo' leggere niente. Il colore invece e' quello della superficie, che
+					// per un pelo diventa assorbimento.
+					//
+					// ── E SI CALCOLANO SOLO SE SERVE ──
+					//
+					// Stavano fuori dal ramo, cioe' su OGNI colpo della scena: due logaritmi
+					// e una catena di potenze per un triangolo che non e' un pelo. Dichiarati
+					// fuori e assegnati dentro costano zero a chi non ha peluria — e servono
+					// in due punti (lo scatter e la NEE), che e' il motivo per cui non stanno
+					// semplicemente dentro un blocco.
+					var hairTangent = vec3f( 1.0, 0.0, 0.0 );
+					var hairFy = vec3f( 0.0, 1.0, 0.0 );
+					var hairFz = vec3f( 0.0, 0.0, 1.0 );
+					var hairH = 0.0;
+					var hairVsm = vec3f( 0.1, 0.1, 0.1 );
+					var hairAbsorption = vec3f( 0.0 );
+					var hairAlpha = 0.0;
+					var hairEta = 1.55;
+					var huang: ${ huangHairStruct };
+					var huangFrame = ${ huangBuildFrameFn }( vec3f( 1.0, 0.0, 0.0 ), vec3f( 0.0, 0.0, 1.0 ), vec3f( 0.0, 1.0, 0.0 ), 1.0 );
+					var huangRng = 1u;
+					let useHuang = isCurve && materialInfo.hairModel > 0.5;
+					if ( isCurve ) {
+
+						hairTangent = normalize( input.barycoord );
+						hairFy = normalize( cross( hairTangent, view ) );
+						hairFz = normalize( cross( hairTangent, hairFy ) );
+						hairH = clamp( dot( cross( input.normal, hairTangent ), hairFz ), -1.0, 1.0 );
+
+						// ── LA VARIAZIONE PER CIOCCA ──
+						//
+						// Il numero arriva nella terza parola degli indici, scritto dal kernel
+						// di tracciamento: qui il pacchetto della peluria non e' legato, e
+						// senza quel viaggio un manto sarebbe N copie dello stesso pelo — che
+						// e' la differenza fra una pelliccia e una moquette.
+						//
+						// I due fattori sono quelli di Cycles: uno piu' due volte lo scarto da
+						// mezzo, per quanto si vuole variare. E' una variazione CENTRATA —
+						// meta' delle ciocche piu' chiare, meta' piu' scure — invece di uno
+						// scarto che sposta la media.
+						let hairRandom = bitcast<f32>( input.indices.z );
+						let hairJitter = 2.0 * ( hairRandom - 0.5 );
+						let hairRoughFactor = 1.0 + hairJitter * materialInfo.hairRandomRoughness;
+						let hairRough = clamp( materialInfo.hairRoughness * hairRoughFactor, 0.02, 1.0 );
+						let hairRadial = clamp( materialInfo.hairRadialRoughness * hairRoughFactor, 0.02, 1.0 );
+						hairVsm = ${ hairSetupFn }( hairRough, hairRadial, materialInfo.hairCoat );
+
+						// ── IL COLORE: i due pigmenti PIU' la tinta, che si sommano ──
+						//
+						// E' quel che Cycles fa dentro il modo a pigmenti (sigma = melanina +
+						// tinta): la melanina a zero lascia il colore del materiale da solo, e
+						// alzandola si sommano i pigmenti veri. Cosi' non serve un enum fra
+						// tre modi che si escludono.
+						//
+						// LA VARIAZIONE PER CIOCCA LE TOCCA ENTRAMBE, e di la' no — li' varia
+						// solo la melanina. E' una divergenza dichiarata: da noi la strada
+						// principale del colore e' la tinta, e lasciarla fuori vorrebbe dire
+						// una manopola che non fa niente finche' non si alza la melanina.
+						let hairColorFactor = max( 0.0, 1.0 + hairJitter * materialInfo.hairRandomColor );
+						hairAbsorption = (
+							${ hairMelaninFn }( materialInfo.hairMelanin, materialInfo.hairRedness )
+							+ ${ hairSigmaFn }( materialInfo.color, hairRadial )
+						) * hairColorFactor;
+						hairAlpha = - materialInfo.hairTilt;
+						hairEta = max( materialInfo.hairIor, 1.001 );
+
+						// ── E SE IL VOLUME CHIEDE HUANG, si prepara l'altro ──
+						//
+						// Huang non e' Chiang con piu' manopole: integra sulla sezione invece
+						// di descrivere i lobi, e da li' vengono la sezione ELLITTICA e i
+						// glint. Il record e' suo, e il frame anche — il suo asse X si allinea
+						// all'asse maggiore dell'ellisse invece che alla vista.
+						if ( materialInfo.hairModel > 0.5 ) {
+
+							huang.sigma = hairAbsorption;
+							huang.roughness = clamp( hairRough, 0.001, 1.0 );
+							huang.tilt = hairAlpha;
+							huang.eta = hairEta;
+							huang.aspectRatio = clamp( materialInfo.hairAspect, 0.05, 1.0 );
+							huang.r = 1.0;
+							huang.tt = 1.0;
+							huang.trt = 1.0;
+							huangFrame = ${ huangBuildFrameFn }( hairTangent, view, input.normal, huang.aspectRatio );
+							// il GENERATORE del cammino dentro la fibra: Huang ne consuma
+							// sei-dieci per valutazione, e non ci sono dimensioni riservate per
+							// tante. Si semina dal percorso, cosi' due pixel non camminano
+							// uguale e lo stesso pixel non ripete se stesso fra un rimbalzo e
+							// l'altro.
+							huangRng = input.seed * 747796405u + input.pixelIndex * 2891336453u + input.currentBounce * 277803737u + 1u;
+
+						}
+
+					}
+
 					// sample the next bounce direction and stage the scatter state for LogicKernel
 					var scatterRec = ${ bsdfSampleFn }( view, surface );
+					if ( isCurve ) {
+
+						if ( useHuang && huangFrame.valid == 1u ) {
+
+							let hu = ${ huangSampleFn }( &${ params.ggxGlassTable }, huang, huangFrame, &huangRng );
+							// la PDF di Huang e' UNO da entrambe le parti: il peso del
+							// campionamento e' gia' dentro il valore, e quel numero serve solo
+							// al MIS — che confronta due stime della stessa cosa, quindi conta
+							// che le due parti dicano lo stesso.
+							scatterRec.color = select( vec3f( 0.0 ), hu.f, hu.valid == 1u );
+							scatterRec.pdf = 1.0;
+							scatterRec.direction = hu.direction;
+							scatterRec.isTransmissive = false;
+
+						} else {
+
+						let hairRand = ${ rand3 }( ${ RNG_INDEX_HAIR } );
+						let hs = ${ hairScatterFn }( hairAbsorption, hairVsm.x, hairVsm.y, hairVsm.z, hairAlpha, hairEta, hairTangent, hairFy, hairFz, hairH, view, hairRand );
+						// NIENTE COSENO: la F di Chiang integra gia' all'albedo sulla sfera,
+						// quindi il fattore di proiezione e' dentro. Moltiplicarlo un'altra
+						// volta scurirebbe il manto di un coseno, e non lo direbbe nessuno.
+						scatterRec.color = hs.f;
+						scatterRec.pdf = hs.pdf;
+						scatterRec.direction = hs.direction;
+						// solo il lobo R e' una riflessione: gli altri tre passano DENTRO il
+						// pelo, ed e' quel che i modi dello sfondo chiamano trasmissivo
+						scatterRec.isTransmissive = hs.lobe != 0u;
+
+						}
+
+					}
 
 					// ── SUBSURFACE: go IN, and come back OUT ──
 					//
@@ -606,7 +790,24 @@ export class MaterialKernel extends ComputeKernel {
 					var lightPdf = select( input.lightPdf, 0.0, enteredSubsurface );
 					if ( lightPdf > 0.0 ) {
 
-						let evalRec = ${ bsdfEvalPdfFn }( view, input.lightDirection, surface );
+						var evalRec = ${ bsdfEvalPdfFn }( view, input.lightDirection, surface );
+						if ( isCurve ) {
+
+							if ( useHuang && huangFrame.valid == 1u ) {
+
+								let hu = ${ huangEvalFn }( &${ params.ggxGlassTable }, huang, huangFrame, input.lightDirection, &huangRng );
+								evalRec.color = hu;
+								evalRec.pdf = 1.0;
+
+							} else {
+
+								let he = ${ hairEvalFn }( hairAbsorption, hairVsm.x, hairVsm.y, hairVsm.z, hairAlpha, hairEta, hairTangent, hairFy, hairFz, hairH, view, input.lightDirection );
+								evalRec.color = he.f;
+								evalRec.pdf = he.pdf;
+
+							}
+
+						}
 						if ( evalRec.pdf > 0.0 ) {
 
 							rayDataStorage[ index ].lightBsdf = evalRec.color;
