@@ -96,6 +96,10 @@ export const rayDataStruct = new StructTypeNode( {
 	// its own - and that budget is the quality knob: it buys depth in a dense medium.
 	subsurfaceSteps: 'uint',
 
+	// il colpo in scena viene da un pelo e non da un triangolo: lo copia
+	// LogicKernel dal risultato della tracciatura, e lo legge MaterialKernel
+	isCurve: 'uint',
+
 
 }, 'RayData' );
 
@@ -129,7 +133,15 @@ export const intersectionResultStruct = new StructTypeNode( {
 	side: 'float',
 
 	indices: 'vec3u',
-	_alignment0: 'uint',
+	// ── UNA CURVA NON E' UN TRIANGOLO, e chi ombreggia deve saperlo ──
+	//
+	// Il colpo su un pelo non ha ne' baricentriche ne' tre indici di vertice: porta
+	// un segmento e una posizione lungo di esso. MaterialKernel si costruisce la
+	// superficie in un altro modo, e questo e' il segnale.
+	//
+	// Prende il posto della parola di riempimento che c'era: il record non cresce di
+	// un byte, ed e' la ragione per cui la bandiera sta qui invece che altrove.
+	isCurve: 'uint',
 
 }, 'TraceResult' );
 
