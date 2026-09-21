@@ -597,22 +597,38 @@ export class MaterialKernel extends ComputeKernel {
 						let hairRadial = clamp( materialInfo.hairRadialRoughness * hairRoughFactor, 0.02, 1.0 );
 						hairVsm = ${ hairSetupFn }( hairRough, hairRadial, materialInfo.hairCoat );
 
-						// ── IL COLORE: i due pigmenti PIU' la tinta, che si sommano ──
+						// ── IL COLORE: TRE MODI, e si escludono ──
 						//
-						// E' quel che Cycles fa dentro il modo a pigmenti (sigma = melanina +
-						// tinta): la melanina a zero lascia il colore del materiale da solo, e
-						// alzandola si sommano i pigmenti veri. Cosi' non serve un enum fra
-						// tre modi che si escludono.
+						// E' il parametrization del nodo Principled Hair, letto nel sorgente
+						// della 5.2: riflettanza (il colore e basta), pigmenti (melanina e
+						// rossore, PIU' una tinta che si somma — la somma sta qui dentro,
+						// dove Cycles la fa), o il coefficiente nudo.
 						//
-						// LA VARIAZIONE PER CIOCCA LE TOCCA ENTRAMBE, e di la' no — li' varia
-						// solo la melanina. E' una divergenza dichiarata: da noi la strada
-						// principale del colore e' la tinta, e lasciarla fuori vorrebbe dire
-						// una manopola che non fa niente finche' non si alza la melanina.
+						// PRIMA SI SOMMAVANO SEMPRE, e la nota lo dichiarava una virtu':
+						// melanina a zero lasciava il colore del materiale. Il conto era
+						// giusto e la conclusione no — sommate, la melanina e il colore sono
+						// due manopole sulla stessa cosa, e quale comandi si scopre provando.
+						//
+						// LA VARIAZIONE PER CIOCCA TOCCA TUTTO l'assorbimento, e di la' varia
+						// solo la melanina. Divergenza dichiarata: cosi' la manopola fa
+						// qualcosa in tutti e tre i modi invece che in uno solo.
 						let hairColorFactor = max( 0.0, 1.0 + hairJitter * materialInfo.hairRandomColor );
-						hairAbsorption = (
-							${ hairMelaninFn }( materialInfo.hairMelanin, materialInfo.hairRedness )
-							+ ${ hairSigmaFn }( materialInfo.color, hairRadial )
-						) * hairColorFactor;
+						var hairSigmaBase: vec3f;
+						if ( materialInfo.hairParametrization < 0.5 ) {
+
+							hairSigmaBase = ${ hairSigmaFn }( materialInfo.color, hairRadial );
+
+						} else if ( materialInfo.hairParametrization < 1.5 ) {
+
+							hairSigmaBase = ${ hairMelaninFn }( materialInfo.hairMelanin, materialInfo.hairRedness )
+								+ ${ hairSigmaFn }( vec3f( materialInfo.hairTintR, materialInfo.hairTintG, materialInfo.hairTintB ), hairRadial );
+
+						} else {
+
+							hairSigmaBase = vec3f( materialInfo.hairAbsorptionR, materialInfo.hairAbsorptionG, materialInfo.hairAbsorptionB );
+
+						}
+						hairAbsorption = hairSigmaBase * hairColorFactor;
 						hairAlpha = - materialInfo.hairTilt;
 						hairEta = max( materialInfo.hairIor, 1.001 );
 

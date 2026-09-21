@@ -970,10 +970,25 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			floatArray[ index ++ ] = getField( m, 'hairModel', 0.0 );
 			floatArray[ index ++ ] = getField( m, 'hairAspect', 0.85 );
 
+			// COME SI DA' IL COLORE: 0 riflettanza (il default, cioe' il comportamento
+			// di sempre), 1 melanina, 2 assorbimento
+			floatArray[ index ++ ] = getField( m, 'hairParametrization', 0.0 );
+
+			// la TINTA: bianca di fabbrica come di la', e bianco vuol dire
+			// nessuna tinta perche' la riflettanza piena da' assorbimento zero.
+			// TRE FLOAT e non un vec3: il perche' sta in structs.wgsl.js
+			const hairTint = m.hairTint;
+			floatArray[ index ++ ] = hairTint ? hairTint.r : 1.0;
+			floatArray[ index ++ ] = hairTint ? hairTint.g : 1.0;
+			floatArray[ index ++ ] = hairTint ? hairTint.b : 1.0;
+
+			// il COEFFICIENTE DI ASSORBIMENTO nudo, col default di Blender
+			const hairAbsorption = m.hairAbsorption;
+			floatArray[ index ++ ] = hairAbsorption ? hairAbsorption.x : 0.245531;
+			floatArray[ index ++ ] = hairAbsorption ? hairAbsorption.y : 0.52;
+			floatArray[ index ++ ] = hairAbsorption ? hairAbsorption.z : 1.365;
+
 			// il riempimento che porta il record al passo della struct: vedi structs.wgsl.js
-			floatArray[ index ++ ] = 0.0;
-			floatArray[ index ++ ] = 0.0;
-			floatArray[ index ++ ] = 0.0;
 			floatArray[ index ++ ] = 0.0;
 			floatArray[ index ++ ] = 0.0;
 

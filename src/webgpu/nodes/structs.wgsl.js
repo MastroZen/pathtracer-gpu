@@ -226,15 +226,35 @@ export const materialStruct = new StructTypeNode( {
 	hairModel: 'float',
 	// il rapporto fra asse minore e maggiore della sezione: lo usa il solo Huang
 	hairAspect: 'float',
+	// COME SI DA' IL COLORE: 0 riflettanza, 1 melanina, 2 assorbimento. E' il
+	// parametrization del nodo Principled Hair, e i tre modi SI ESCLUDONO — prima
+	// melanina e colore si sommavano, cioe' due manopole sulla stessa cosa.
+	hairParametrization: 'float',
+	// ── SEI FLOAT E NON DUE vec3, ed e' una scelta con un numero accanto ──
+	//
+	// Un vec3 si allinea a 16 byte, quindi apre un BUCO che lo scrittore del
+	// record non vede: dichiarati come vettori, la struct chiedeva 308 parole
+	// mentre il writer ne scriveva 304, e il tracciatore rifiutava ogni materiale
+	// (preso dalla guardia a runtime, che per questo esiste). Compensare il buco
+	// vorrebbe dire tenere a mano due tabelle di offset in due file; sei float
+	// hanno allineamento uno e il problema non e' rappresentabile.
+	//
+	// La TINTA si somma ai pigmenti, e vale solo nel modo melanina: e' il termine
+	// che Cycles somma la' dentro (sigma = melanina + tinta).
+	hairTintR: 'float',
+	hairTintG: 'float',
+	hairTintB: 'float',
+	// il coefficiente di assorbimento NUDO, e vale solo nel modo assorbimento: tre
+	// numeri e non un colore, perche' non sta in 0..1 (di la' arriva a 1000)
+	hairAbsorptionR: 'float',
+	hairAbsorptionG: 'float',
+	hairAbsorptionB: 'float',
 	// e il RIEMPIMENTO che porta il record al passo della struct: i `vec3` la
 	// allineano a quattro float, quindi il totale va tenuto multiplo di quattro.
 	// Il controllo a runtime nel writer conta le parole scritte e le confronta.
 	_hairAlignment0: 'float',
 	_hairAlignment1: 'float',
-	_hairAlignment2: 'float',
-	_hairAlignment3: 'float',
-	_hairAlignment4: 'float',
-	// total size = 300
+	// total size = 304
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {
