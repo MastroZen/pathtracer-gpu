@@ -44,8 +44,9 @@ const blueDitherNextBounceFunc = wgslTagFn/* wgsl */`
 	}
 `;
 
-// The per-pixel scalar is rotated by the golden ratio per dimension. Apply a per-dimension
-// offset to reduce the corelation of the sequence.
+// The per-pixel scalar is added to EVERY dimension alike: there is no rotation per dimension, so
+// the pairing between dimensions stays the one of the shared sequence in every pixel, and its
+// error does not average out across the image - see RANDOM_BLUE_DITHER in constants.js.
 const blueDitherRand4Func = wgslTagFn/* wgsl */`
 	fn blueDitherRand4( effect: u32 ) -> vec4f {
 

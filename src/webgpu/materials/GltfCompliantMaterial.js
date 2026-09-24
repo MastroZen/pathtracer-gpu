@@ -228,7 +228,7 @@ export class GltfCompliantMaterial extends PathtracingMaterial {
 
 					// KHR_materials_specular: fold the specular color and intensity into the dielectric f0.
 					// Schlick is used on both hit sides, matching Cycles - the opaque specular carries no
-					// TIR so the energy removed from the base always matches the energy paid back
+					// TIR, so the energy removed from the base below can match the energy paid back here
 					let dielectricF0 = min( surf.f0 * surf.specularColor, vec3f( 1.0 ) );
 					let dielectricFr = ${ schlickFresnelVecFunc }( ctx.VdotH, dielectricF0, vec3f( 1.0 ) );
 					var dielectricReflectance = surf.specularIntensity * dielectricFr;
@@ -254,11 +254,19 @@ export class GltfCompliantMaterial extends PathtracingMaterial {
 					let metallic = metallicSpecular * metallicReflectance;
 					let dielectric = dielectricSpecular * dielectricReflectance;
 
-					// the energy the specular interface takes from the layers below
-					let fresnelEnergySS = ${ this.turquinTexture.sampleDielectricFn }( NdotV, surf.roughness, surf.ior ) * dielectricBoost;
+					// the energy the specular interface takes from the layers below is the energy
+					// it reflects: the SAME tinted f0 and the SAME intensity as the lobe above.
+					// The table holds the albedo at the f0 of the ior, and Schlick is linear in f0,
+					// so the tinted albedo slides from that entry toward the conductor one (f0 = 1).
+					// Without the intensity a specular level of zero reflected nothing and still
+					// darkened the diffuse: -1.75% on a white floor seen from above, and -38% seen
+					// at grazing angles, in a white furnace where the answer is exactly the sky
+					let tableEnergy = ${ this.turquinTexture.sampleDielectricFn }( NdotV, surf.roughness, surf.ior );
+					let tintedEnergy = tableEnergy + ( dielectricF0 - vec3f( surf.f0 ) ) * ( energySS - tableEnergy ) / max( 1.0 - surf.f0, 1e-5 );
+					let fresnelEnergySS = surf.specularIntensity * tintedEnergy * dielectricBoost;
 
 					result += attenuation * mix( ( 1.0 - surf.transmission ) * dielectric, metallic, surf.metalness );
-					attenuation *= ( 1.0 - surf.metalness ) * mix( 1.0 - fresnelEnergySS, 1.0 - filmFresnelMax, surf.iridescence );
+					attenuation *= ( 1.0 - surf.metalness ) * mix( vec3f( 1.0 ) - fresnelEnergySS, vec3f( 1.0 - filmFresnelMax ), surf.iridescence );
 
 				}
 

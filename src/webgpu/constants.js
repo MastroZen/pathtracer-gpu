@@ -13,7 +13,8 @@ import * as bluedither from './nodes/rand/bluedither.wgsl.js';
 export const RANDOM_PCG = pcg;
 
 /**
- * Sobol low discrepancy samples, scrambled per pixel. Converges faster than `RANDOM_PCG`.
+ * Sobol low discrepancy samples, scrambled per pixel. Converges faster than `RANDOM_PCG`. The
+ * default.
  * @section Random Strategies
  * @type {Object}
  */
@@ -21,7 +22,10 @@ export const RANDOM_SOBOL = sobol;
 
 /**
  * The same Sobol sequence for every pixel, offset by a blue noise dither so early frames read as
- * smooth grain rather than clumped noise. The default.
+ * smooth grain rather than clumped noise. BIASED wherever a random choice is paired with a
+ * sampled direction, such as the lobe of a layered material: the pairing is the same in every
+ * pixel, so its error does not average out across the image (a white furnace measured 4.9% dark
+ * at grazing angles with 256 samples). Not the default for that reason.
  * @section Random Strategies
  * @type {Object}
  */

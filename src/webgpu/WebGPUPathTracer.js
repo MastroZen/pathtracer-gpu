@@ -15,7 +15,7 @@ import { setCommonAttributes } from '../core/utils/GeometryPreparationUtils.js';
 import { getLights } from '../core/utils/sceneUpdateUtils.js';
 import { GltfCompliantMaterial } from './materials/GltfCompliantMaterial.js';
 import { TRANSMISSIVE_BACKGROUND_OVERLAY } from './constants.js';
-import * as RANDOM_BLUE_DITHER from './nodes/rand/bluedither.wgsl.js';
+import * as RANDOM_SOBOL from './nodes/rand/sobol.wgsl.js';
 /** @import { Camera, Scene, Texture, WebGPURenderer } from 'three/webgpu' */
 /** @import { OIDNDenoiser } from './denoise/OIDNDenoiser.js' */
 /** @import { FSRUpscaler } from './upscale/FSRUpscaler.js' */
@@ -621,11 +621,19 @@ export class WebGPUPathTracer {
 		this.transmissiveBackground = TRANSMISSIVE_BACKGROUND_OVERLAY;
 
 		/**
-		 * Random number generator the kernels sample with.
+		 * Random number generator the kernels sample with: one Owen scrambled Sobol sequence
+		 * PER PIXEL, the default of Cycles too (tabulated Sobol, with a per pixel hash).
+		 *
+		 * The blue dither was the default and it is BIASED: every pixel shares one sequence,
+		 * so the pairing between dimensions - which lobe, which direction - is the same in
+		 * every pixel, and its error does not average out across the image. A white furnace
+		 * with a two lobe material came out 4.9% dark at grazing angles at 256 samples, and
+		 * exact with this sampler or with PCG. The blue noise patterns of Cycles avoid it by
+		 * giving each pixel its own SECTION of one long sequence instead of a shifted copy.
 		 * @type {Object}
 		 * @private
 		 */
-		this.random = RANDOM_BLUE_DITHER;
+		this.random = RANDOM_SOBOL;
 
 		/**
 		 * Material model the kernels evaluate surfaces with.
