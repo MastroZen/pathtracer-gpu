@@ -127,8 +127,19 @@ export class LogicKernel extends ComputeKernel {
 
 				}
 
-				// emission gathered at the previous surface (pre-scatter throughput)
-				let emission = ${ clampPathContributionFunc }( throughputColor * input.emission, input.currentBounce, clampDirect, clampIndirect );
+				// ── THE CLAMP DEPTH, as in Cycles (film/light_passes.h) ──
+				//
+				// A depth of one or less is DIRECT and is not clamped by default. Direct light is
+				// clamped at the depth of the surface it lights; background, lights and emission
+				// found by a ray at the depth of the path minus one, so light reaching the first
+				// surface is direct whichever way it arrives. The escape, the light hits and the
+				// gathered emission were all clamped one bounce deeper: under a bright source the
+				// indirect limit cut them, and a glossy reflection of a bright area light came
+				// out at 28% of its radiance.
+
+				// emission gathered at the previous surface (pre-scatter throughput): that surface was
+				// reached one bounce earlier than the one being lit now
+				let emission = ${ clampPathContributionFunc }( throughputColor * input.emission, max( input.currentBounce, 1u ) - 1u, clampDirect, clampIndirect );
 				resultColor += vec4f( emission, 0.0 );
 
 				// reconstruct the scatter record staged by MaterialKernel
@@ -166,7 +177,7 @@ export class LogicKernel extends ComputeKernel {
 
 								}
 
-								let lightHit = ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight, input.currentBounce + 1u, clampDirect, clampIndirect );
+								let lightHit = ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight, input.currentBounce, clampDirect, clampIndirect );
 								resultColor += vec4f( lightHit, 0.0 );
 
 							}
@@ -241,7 +252,7 @@ export class LogicKernel extends ComputeKernel {
 							}
 
 							let environment = ${ sampleEnvColor }( input.direction ).rgb * throughputColor * misWeight;
-							let contribution = ${ clampPathContributionFunc }( environment, input.currentBounce + 1u, clampDirect, clampIndirect );
+							let contribution = ${ clampPathContributionFunc }( environment, input.currentBounce, clampDirect, clampIndirect );
 							resultColor += vec4f( contribution, 0.0 );
 
 						} else {
@@ -253,7 +264,7 @@ export class LogicKernel extends ComputeKernel {
 							if ( input.currentBounce == 0u ) {
 
 								// sample the background directly if this is the primary ray
-								let background = ${ clampPathContributionFunc }( bg.a * bg.rgb, input.currentBounce + 1u, clampDirect, clampIndirect );
+								let background = ${ clampPathContributionFunc }( bg.a * bg.rgb, input.currentBounce, clampDirect, clampIndirect );
 								resultColor = vec4f( background, bg.a );
 
 							} else {
@@ -274,7 +285,7 @@ export class LogicKernel extends ComputeKernel {
 								if ( transmissiveBackground == ${ TRANSMISSIVE_BACKGROUND_ENVIRONMENT }u ) {
 
 									// display the env map through transmissive surfaces
-									let background = ${ clampPathContributionFunc }( env.rgb * throughputColor * misWeight, input.currentBounce + 1u, clampDirect, clampIndirect );
+									let background = ${ clampPathContributionFunc }( env.rgb * throughputColor * misWeight, input.currentBounce, clampDirect, clampIndirect );
 									resultColor = vec4f(
 										resultColor.rgb + background,
 										1.0,
@@ -283,7 +294,7 @@ export class LogicKernel extends ComputeKernel {
 								} else if ( transmissiveBackground == ${ TRANSMISSIVE_BACKGROUND_TRANSPARENT }u ) {
 
 									// fade the background by the throughput color average
-									let background = ${ clampPathContributionFunc }( bg.a * bg.rgb * throughputColor * misWeight, input.currentBounce + 1u, clampDirect, clampIndirect );
+									let background = ${ clampPathContributionFunc }( bg.a * bg.rgb * throughputColor * misWeight, input.currentBounce, clampDirect, clampIndirect );
 									resultColor = vec4f(
 										resultColor.rgb + background,
 										1.0 - transparency,
@@ -293,7 +304,7 @@ export class LogicKernel extends ComputeKernel {
 
 									// fade the background by the throughput color average, mixing in env lighting
 									var light = mix( env.rgb, bg.rgb, bg.a ) * misWeight;
-									let background = ${ clampPathContributionFunc }( light * throughputColor, input.currentBounce + 1u, clampDirect, clampIndirect );
+									let background = ${ clampPathContributionFunc }( light * throughputColor, input.currentBounce, clampDirect, clampIndirect );
 									resultColor = vec4f(
 										resultColor.rgb + background,
 										1.0 - transparency,

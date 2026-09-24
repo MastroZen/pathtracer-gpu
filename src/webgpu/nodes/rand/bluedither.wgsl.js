@@ -1,6 +1,7 @@
-import { texture, vec4 } from 'three/tsl';
+import { texture, uint, uvec2 } from 'three/tsl';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rand4, rngInit, rngNextBounce } from './sobol.wgsl.js';
+import { RNG_INDEX_ALPHA_TEST } from '../random.wgsl.js';
 import { BlueNoiseTexture } from '../../../textures/BlueNoiseTexture.js';
 
 // Based in part on the "stratified" random sample implement from the WebGLPathTracer which
@@ -19,18 +20,23 @@ import { BlueNoiseTexture } from '../../../textures/BlueNoiseTexture.js';
 // constants
 const BN_SIZE = 64;
 
+// the dimensions of one bounce: one per effect index, and alpha test is the highest. Odd, so
+// with the bijection of blueDitherShift no two dimensions share a texel within 20 bounces
+const EFFECTS_PER_BOUNCE = RNG_INDEX_ALPHA_TEST + 1;
+
 // construct nodes
 const blueNoiseTex = new BlueNoiseTexture( BN_SIZE, 1 );
 const blueNoiseTexNode = texture( blueNoiseTex );
-const pixelSeed = vec4( 0 ).toVar( 'blueDitherSeed' );
+const pixelCoord = uvec2( 0 ).toVar( 'blueDitherPixel' );
+const bounceIndexVar = uint( 0 ).toVar( 'blueDitherBounce' );
 
 // When dithering, the sobol sampler is seeded with a constant pixel so every pixel
 // uses the same sequence, which is modified with the per-pixel blue noise sample.
 const blueDitherInitFunc = wgslTagFn/* wgsl */`
 	fn blueDitherInitialize( pixel: vec2u, pathIndex: u32, bounceIndex: u32 ) -> void {
 
-		let coord = vec2i( pixel % vec2u( ${ BN_SIZE }u ) );
-		${ pixelSeed } = textureLoad( ${ blueNoiseTexNode }, coord, 0 );
+		${ pixelCoord } = pixel % vec2u( ${ BN_SIZE }u );
+		${ bounceIndexVar } = bounceIndex;
 		${ rngInit }( vec2u( 0 ), pathIndex, bounceIndex );
 
 	}
@@ -39,22 +45,50 @@ const blueDitherInitFunc = wgslTagFn/* wgsl */`
 const blueDitherNextBounceFunc = wgslTagFn/* wgsl */`
 	fn blueDitherNextBounce() -> void {
 
+		${ bounceIndexVar }++;
 		${ rngNextBounce }();
 
 	}
 `;
 
-// The per-pixel scalar is added to EVERY dimension alike: there is no rotation per dimension, so
-// the pairing between dimensions stays the one of the shared sequence in every pixel, and its
-// error does not average out across the image - see RANDOM_BLUE_DITHER in constants.js.
+// ONE INDEPENDENT SHIFT PER DIMENSION: the same blue noise, read at an offset that differs for
+// every bounce, every effect and every component. A single scalar added to all of them kept the
+// pairing between dimensions - which lobe, which direction - the one of the shared sequence in
+// every pixel, and its error did not average out across the image: a white furnace with a two
+// lobe material came out 4.9% dark at grazing angles with 256 samples. With a shift of its own,
+// each dimension still reads as blue noise across the screen, and across the image the shifts
+// of any two dimensions are independent, so the pairing changes from pixel to pixel.
+// The bounce is in the dimension because the Sobol seed hashes it: with the effect alone, two
+// bounces of the same effect shared one shift, the same coupling a bounce apart. A furnace
+// with a floor and a wall did not show it (0.1% from Sobol at 256 samples); it is closed
+// because it is the coupling that made the single shift biased, not because it was measured.
+const blueDitherShiftFunc = wgslTagFn/* wgsl */`
+	fn blueDitherShift( dimension: u32 ) -> f32 {
+
+		// 1597 is odd, so this is a bijection of the texels: consecutive dimensions land far apart
+		let texel = ( dimension * 1597u ) % ${ BN_SIZE * BN_SIZE }u;
+		let offset = vec2u( texel % ${ BN_SIZE }u, texel / ${ BN_SIZE }u );
+		let coord = ( ${ pixelCoord } + offset ) % vec2u( ${ BN_SIZE }u );
+		return textureLoad( ${ blueNoiseTexNode }, vec2i( coord ), 0 ).r;
+
+	}
+`;
+
 const blueDitherRand4Func = wgslTagFn/* wgsl */`
+	${ [ blueDitherShiftFunc ] }
 	fn blueDitherRand4( effect: u32 ) -> vec4f {
 
-		// Get the scrambled sobol stratified sample
+		// the scrambled sobol stratified sample, the same in every pixel
 		let stratifiedSample = ${ rand4 }( effect );
 
-		// offset it by the blue noise seed and dimension rotation
-		return fract( stratifiedSample + ${ pixelSeed }.r );
+		let first = ( ${ bounceIndexVar } * ${ EFFECTS_PER_BOUNCE }u + effect ) * 4u;
+		let shift = vec4f(
+			${ blueDitherShiftFunc }( first ),
+			${ blueDitherShiftFunc }( first + 1u ),
+			${ blueDitherShiftFunc }( first + 2u ),
+			${ blueDitherShiftFunc }( first + 3u ),
+		);
+		return fract( stratifiedSample + shift );
 
 	}
 `;

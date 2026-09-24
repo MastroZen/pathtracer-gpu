@@ -15,7 +15,7 @@ import { setCommonAttributes } from '../core/utils/GeometryPreparationUtils.js';
 import { getLights } from '../core/utils/sceneUpdateUtils.js';
 import { GltfCompliantMaterial } from './materials/GltfCompliantMaterial.js';
 import { TRANSMISSIVE_BACKGROUND_OVERLAY } from './constants.js';
-import * as RANDOM_SOBOL from './nodes/rand/sobol.wgsl.js';
+import * as RANDOM_BLUE_DITHER from './nodes/rand/bluedither.wgsl.js';
 /** @import { Camera, Scene, Texture, WebGPURenderer } from 'three/webgpu' */
 /** @import { OIDNDenoiser } from './denoise/OIDNDenoiser.js' */
 /** @import { FSRUpscaler } from './upscale/FSRUpscaler.js' */
@@ -621,19 +621,22 @@ export class WebGPUPathTracer {
 		this.transmissiveBackground = TRANSMISSIVE_BACKGROUND_OVERLAY;
 
 		/**
-		 * Random number generator the kernels sample with: one Owen scrambled Sobol sequence
-		 * PER PIXEL, the default of Cycles too (tabulated Sobol, with a per pixel hash).
+		 * Random number generator the kernels sample with: the blue dither, so the error of
+		 * the first samples spreads as blue noise across the screen - what the Automatic
+		 * pattern of Cycles does in the viewport.
 		 *
-		 * The blue dither was the default and it is BIASED: every pixel shares one sequence,
-		 * so the pairing between dimensions - which lobe, which direction - is the same in
-		 * every pixel, and its error does not average out across the image. A white furnace
-		 * with a two lobe material came out 4.9% dark at grazing angles at 256 samples, and
-		 * exact with this sampler or with PCG. The blue noise patterns of Cycles avoid it by
-		 * giving each pixel its own SECTION of one long sequence instead of a shifted copy.
+		 * It was the default before and it was BIASED: one scalar shifted every dimension
+		 * alike, so the pairing between dimensions was the same in every pixel and its error
+		 * did not average out (4.9% dark at grazing angles in a white furnace). Each
+		 * dimension now has its own shift - see bluedither.wgsl.js - and the furnace is exact.
+		 * On a floor of constant radiance, from 1 to 8 samples a 4x4 box keeps 2.2 to 2.9% of
+		 * the variance, where white noise keeps 6.25%; by 16 samples it is nearly white (5.1%).
+		 * Cycles reaches blue noise another way, giving each pixel its own section of one
+		 * long sequence; the Sobol generator here stops at 65536 points.
 		 * @type {Object}
 		 * @private
 		 */
-		this.random = RANDOM_SOBOL;
+		this.random = RANDOM_BLUE_DITHER;
 
 		/**
 		 * Material model the kernels evaluate surfaces with.
