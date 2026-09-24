@@ -1,6 +1,6 @@
 import { wgslFn } from 'three/tsl';
 import { constants, lobeWeightsStruct } from './structs.wgsl.js';
-import { disneyFresnelFunc, iorToF0Func, schlickFresnelFunc } from './utils.wgsl.js';
+import { disneyFresnelFunc, getBasisFromNormalFunc, iorToF0Func, schlickFresnelFunc } from './utils.wgsl.js';
 
 /*
 wi     : incident vector or light vector (pointing toward the light)
@@ -23,6 +23,42 @@ export const sampleSphereFunc = wgslFn( /* wgsl */ `
 	}
 
 `, [ constants ] );
+
+// ── SIZED LIGHTS: the cone of directions a light of finite size fills ──
+//
+// One minus the cosine of the half angle of a cone whose half angle has the given squared
+// sine. It is sin_sqr_to_one_minus_cos of Cycles, second order Taylor below 0.0004: a light of
+// 10 cm seen from 10 m has a squared sine of 1e-4, and one minus the square root of one minus
+// that, in single precision, keeps only three digits.
+export const sinSqrToOneMinusCosFunc = wgslFn( /* wgsl */ `
+
+	fn sinSqrToOneMinusCos( sSq: f32 ) -> f32 {
+
+		return select( 1.0 - sqrt( max( 1.0 - sSq, 0.0 ) ), 0.5 * sSq, sSq <= 0.0004 );
+
+	}
+
+` );
+
+// A direction uniform in solid angle inside the cone of half angle theta around "axis". The
+// cone is given as one minus the cosine of theta, never as the angle: the sun is a quarter of a
+// degree, and one minus its cosine written as a subtraction would lose half of its digits. It is
+// sample_uniform_cone of Cycles.
+export const sampleUniformConeFunc = wgslFn( /* wgsl */ `
+
+	fn sampleUniformCone( axis: vec3f, oneMinusCos: f32, uv: vec2f ) -> vec3f {
+
+		// one minus the cosine is uniform over the cap: that is what uniform in solid angle means
+		let t = uv.x * oneMinusCos;
+		let cosTheta = 1.0 - t;
+		let sinTheta = sqrt( max( t * ( 2.0 - t ), 0.0 ) );
+		let phi = 2.0 * PI * uv.y;
+		let basis = getBasisFromNormal( axis );
+		return normalize( basis * vec3f( sinTheta * cos( phi ), sinTheta * sin( phi ), cosTheta ) );
+
+	}
+
+`, [ constants, getBasisFromNormalFunc ] );
 
 // TODO: Investigate sampling directly in tagent space?
 // See 16.6.1 in https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.9.pdf

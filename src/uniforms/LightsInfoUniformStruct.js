@@ -190,7 +190,8 @@ export class LightsInfoUniformStruct {
 				index += 4;
 
 				// sample 5
-				index += 1;
+				// radius: a point light with a size is a sphere, as in Cycles. Zero keeps it a point
+				floatArray[ baseIndex + ( index ++ ) ] = l.radius || 0;
 
 				floatArray[ baseIndex + ( index ++ ) ] = l.decay;
 				floatArray[ baseIndex + ( index ++ ) ] = l.distance;
@@ -206,6 +207,16 @@ export class LightsInfoUniformStruct {
 				floatArray[ baseIndex + ( index ++ ) ] = target.x;
 				floatArray[ baseIndex + ( index ++ ) ] = target.y;
 				floatArray[ baseIndex + ( index ++ ) ] = target.z;
+				index ++;
+
+				// sample 4
+				index += 4;
+
+				// sample 5
+				// radius: "sunAngle" is the full angular diameter in radians, the sun_angle of
+				// Blender, and the slot takes the tangent of half of it - the radius of the disc
+				// at unit distance. Zero keeps the delta light
+				floatArray[ baseIndex + ( index ++ ) ] = Math.tan( 0.5 * ( l.sunAngle || 0 ) );
 
 			}
 

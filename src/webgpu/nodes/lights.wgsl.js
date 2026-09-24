@@ -1,5 +1,6 @@
 import { wgslFn } from 'three/tsl';
 import { constants, lightStruct, lightRecordStruct } from './structs.wgsl.js';
+import { sampleUniformConeFunc, sinSqrToOneMinusCosFunc } from './sampling.wgsl.js';
 
 // Light type tags matching LightsInfoUniformStruct's packing. The environment is treated as an
 // additional light kind so env + analytic lights share one NEE path.
@@ -163,41 +164,96 @@ export const randomAreaLightSampleFn = wgslFn( /* wgsl */ `
 
 `, [ lightStruct, lightRecordStruct, constants ] );
 
-// Samples the disc of a spot light with distance falloff. Angular ( cone or IES ) attenuation is applied by the caller.
-export const randomSpotLightSampleFn = wgslFn( /* wgsl */ `
+// ── SIZED LIGHTS: the SPHERE of Cycles ──
+//
+// A point or spot light with a radius is a sphere of uniform radiance, and a shading point sees
+// a cap of it: the direction is drawn uniformly inside the cone that cap fills, which is the
+// estimator of point_light_sample and spot_light_sample in Cycles 4.0 and later. It never runs
+// with a zero radius - the callers keep the delta light, so a scene without sizes renders
+// exactly as before.
+//
+// The radiance of the sphere is the intensity over pi r^2, and it fills a solid angle of
+// 2 pi ( 1 - cos ): together that is the intensity over d^2 times 2 / ( 1 + cos ). The factor is
+// one far from the light and two touching it, and it rides on top of the distance attenuation
+// so that decay and cutoff distance keep their meaning.
+//
+// Inside the sphere there is no cap to sample: the light stays the point at its center. Cycles
+// samples the hemisphere there.
+//
+// No early return, on purpose: an early return inside a function the tracing loop inlines has
+// already cost a lost device on the D3D11 backend.
+export const randomSphereLightSampleFn = wgslFn( /* wgsl */ `
 
-	fn randomSpotLightSample( light: Light, rayOrigin: vec3f, ruv: vec2f ) -> LightRecord {
+	fn randomSphereLightSample( light: Light, center: vec3f, rayOrigin: vec3f, ruv: vec2f ) -> LightRecord {
 
-		let radius = light.radius * sqrt( ruv.x );
-		let theta = ruv.y * 2.0 * PI;
-		let x = radius * cos( theta );
-		let y = radius * sin( theta );
-
-		let u = light.u;
-		let v = light.v;
-		let normal = normalize( cross( u, v ) );
-
-		let angle = acos( light.coneCos );
-		let angleTan = tan( angle );
-		let startDistance = light.radius / max( angleTan, EPSILON );
-
-		let randomPos = light.position - normal * startDistance + u * x + v * y;
-		let toLight = randomPos - rayOrigin;
-		let lightDistSq = dot( toLight, toLight );
-		let dist = sqrt( lightDistSq );
-
-		let direction = toLight / max( dist, EPSILON );
+		let toCenter = center - rayOrigin;
+		let distSq = dot( toCenter, toCenter );
+		let dist = sqrt( distSq );
+		let axis = toCenter / max( dist, EPSILON );
+		let radiusSq = light.radius * light.radius;
 		let distanceAttenuation = getDistanceAttenuation( dist, light.distance, light.decay );
 
 		var lightRec: LightRecord;
 		lightRec.lightType = light.lightType;
-		lightRec.dist = dist;
-		lightRec.direction = direction;
-		lightRec.emission = light.color * light.intensity * distanceAttenuation;
 		lightRec.pdf = 1.0;
+		lightRec.dist = dist;
+		lightRec.direction = axis;
+		lightRec.emission = light.color * light.intensity * distanceAttenuation;
+
+		if ( distSq > radiusSq ) {
+
+			let oneMinusCos = sinSqrToOneMinusCos( radiusSq / distSq );
+			let direction = sampleUniformCone( axis, oneMinusCos, ruv );
+
+			// law of cosines: the near side of the sphere along the sampled direction
+			let cosTheta = dot( direction, axis );
+			lightRec.dist = dist * cosTheta - sqrt( max( radiusSq - distSq + distSq * cosTheta * cosTheta, 0.0 ) );
+			lightRec.direction = direction;
+			lightRec.emission *= 2.0 / ( 2.0 - oneMinusCos );
+
+		}
 
 		return lightRec;
 
 	}
 
-`, [ lightStruct, lightRecordStruct, constants, getDistanceAttenuationFn ] );
+`, [ lightStruct, lightRecordStruct, constants, getDistanceAttenuationFn, sinSqrToOneMinusCosFunc, sampleUniformConeFunc ] );
+
+// Samples a spot light with distance falloff. Angular ( cone or IES ) attenuation is applied by
+// the caller, on the sampled direction as Cycles does: with a radius the edge of the cone blurs
+// too, not only the shadow.
+//
+// With a radius the spot is the sphere of the point light. It was a disc here, pushed forward
+// along the axis by radius / tan( angle ) so that it filled the cone: a narrow spot of 10 cm put
+// its emitter a metre in front of the lamp, inside whatever was there.
+export const randomSpotLightSampleFn = wgslFn( /* wgsl */ `
+
+	fn randomSpotLightSample( light: Light, rayOrigin: vec3f, ruv: vec2f ) -> LightRecord {
+
+		var lightRec: LightRecord;
+		if ( light.radius > 0.0 ) {
+
+			lightRec = randomSphereLightSample( light, light.position, rayOrigin, ruv );
+
+		} else {
+
+			let toLight = light.position - rayOrigin;
+			let lightDistSq = dot( toLight, toLight );
+			let dist = sqrt( lightDistSq );
+
+			let direction = toLight / max( dist, EPSILON );
+			let distanceAttenuation = getDistanceAttenuation( dist, light.distance, light.decay );
+
+			lightRec.lightType = light.lightType;
+			lightRec.dist = dist;
+			lightRec.direction = direction;
+			lightRec.emission = light.color * light.intensity * distanceAttenuation;
+			lightRec.pdf = 1.0;
+
+		}
+
+		return lightRec;
+
+	}
+
+`, [ lightStruct, lightRecordStruct, constants, getDistanceAttenuationFn, randomSphereLightSampleFn ] );

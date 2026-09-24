@@ -16,8 +16,10 @@ import {
 	intersectsCircleFn,
 	randomAreaLightSampleFn,
 	randomSpotLightSampleFn,
+	randomSphereLightSampleFn,
 	getSpotAttenuationFn,
 } from './nodes/lights.wgsl.js';
+import { sampleUniformConeFunc } from './nodes/sampling.wgsl.js';
 
 export class LightsInfoNode extends LightsInfoUniformStruct {
 
@@ -119,6 +121,11 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 
 					result.emission *= spotAttenuation;
 
+				} else if ( light.lightType == ${ POINT_LIGHT_TYPE } && light.radius > 0.0 ) {
+
+					// ── SIZED POINT LIGHT ── a sphere around the position packed in the u slot
+					result = ${ randomSphereLightSampleFn }( light, light.u, rayOrigin, ruv );
+
 				} else if ( light.lightType == ${ POINT_LIGHT_TYPE } ) {
 
 					// the point light's world position is packed into the u slot
@@ -144,6 +151,17 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 					// the directional light's direction is packed into the u slot
 					result.dist = ${ LIGHT_FAR_DISTANCE };
 					result.direction = light.u;
+					// ── SUN CONE ── the sun has an angular diameter, and the radius slot holds the
+					// tangent of half of it: the disc it would be at unit distance, as Cycles kept it
+					// once. Zero keeps the delta light. The irradiance does not change - a uniform
+					// cone sampled with its own pdf folded in carries exactly the strength.
+					if ( light.radius > 0.0 ) {
+
+						let tanSq = light.radius * light.radius;
+						let oneMinusCos = tanSq / ( 1.0 + tanSq + sqrt( 1.0 + tanSq ) );
+						result.direction = ${ sampleUniformConeFunc }( light.u, oneMinusCos, ruv );
+
+					}
 					result.pdf = 1.0;
 					result.emission = light.color * light.intensity;
 					result.lightType = light.lightType;
