@@ -317,10 +317,12 @@ export const environmentInfoStruct = new StructTypeNode( {
 	totalSum: 'float',
 }, 'EnvironmentInfo' );
 
-// Result of importance-sampling the environment map: a world-space direction,
-// its radiance, and the pdf (in solid-angle measure) of having sampled it.
+// Result of importance-sampling the environment: a world-space direction and the
+// pdf (in solid-angle measure) of having drawn it. No radiance on purpose: the
+// kernels read it from sampleColor, the SAME function an escaping bsdf ray reads, so
+// the two strategies of the MIS see one environment - and a wrapper around
+// sampleColor (a sun disc added from outside) reaches both.
 export const environmentSampleStruct = new StructTypeNode( {
-	color: 'vec3f',
 	direction: 'vec3f',
 	pdf: 'float',
 }, 'EnvironmentSample' );

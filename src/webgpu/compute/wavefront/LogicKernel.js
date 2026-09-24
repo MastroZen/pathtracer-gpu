@@ -203,7 +203,8 @@ export class LogicKernel extends ComputeKernel {
 								// the environment, sampled from its CDF, as a light of kind ENVIRONMENT
 								let envSample = ${ sampleEnvDir }( ruv.yz );
 								lightRec.direction = envSample.direction;
-								lightRec.emission = envSample.color;
+								// the radiance of the escape branch, not a copy of it
+								lightRec.emission = ${ sampleEnvColor }( envSample.direction ).rgb;
 								lightRec.pdf = envSample.pdf;
 								lightRec.dist = ${ LIGHT_FAR_DISTANCE };
 								lightRec.lightType = ${ ENVIRONMENT_LIGHT_TYPE };

@@ -312,6 +312,18 @@ export class EquirectHdrInfoUniform {
 		this.totalSum = totalSumValue;
 		this.map = map;
 
+		// ── THE CDFs THEMSELVES, kept for exact sampling ──
+		//
+		// The inverse tables above store the CENTER of a texel, so every sample that
+		// lands in a texel lands on the same direction: a sun held by four texels
+		// becomes four point lights, and a shadow edge shows the partial sums as flat
+		// steps (measured 0.33 against the 0.328 energy share of one texel row). The
+		// WebGPU sampler searches these instead and interpolates inside the texel, as
+		// background_map_sample does in Cycles. Inclusive and normalized: the last
+		// entry of a row, and of the marginal, is one.
+		this.cdfMarginal = cdfMarginal;
+		this.cdfConditional = cdfConditional;
+
 	}
 
 }
