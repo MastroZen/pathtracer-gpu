@@ -439,6 +439,11 @@ export class AtlasTexture {
 
 			const { x, y, w, h, page } = placements[ i ];
 
+			// A TEXTURE STILL LOADING has no image yet, and its copy is marked for upload with
+			// nothing behind it: three throws reading image.complete. The tile stays clear, and
+			// the caller packs the atlas again once the image has arrived.
+			if ( ! textures[ i ].image ) continue;
+
 			// Clone the source so we get an independent texture handle
 			const texture = textures[ i ].clone();
 			texture.matrixAutoUpdate = false;

@@ -167,7 +167,11 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		const { textureAtlas, storage, fns } = this;
 		const textures = textureAtlas.texture;
-		const textureInfo = uniformArray( textureAtlas.textureInfo, 'uvec4' );
+		// A STABLE NAME: without one three names the buffer after the node id, the node is
+		// new with every scene, and the kernels that read it came out as a different
+		// shader each time - the same scene opened twice recompiled for 37 seconds. With
+		// the name the source is identical, and the device reuses the compiled pipeline.
+		const textureInfo = uniformArray( textureAtlas.textureInfo, 'uvec4' ).setName( 'bvh_textureInfo' );
 
 		// build the single sampleTexel bound to this instance's textureInfo node
 		const sampleTexel = sampleTexelFunc( textureInfo, texture( textures ) );
