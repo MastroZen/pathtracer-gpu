@@ -66,10 +66,16 @@ PhysicalCamera.prototype.getCameraRayFn = function getCameraRayFn() {
 
 			// depth of field
 			// measure focus distance along the optical axis so the focal surface is a flat
-			// plane perpendicular to the camera forward vector rather than a sphere.
+			// plane perpendicular to the camera forward vector rather than a sphere. It is
+			// measured from the LENS, as Cycles does (Pfocus is D * focaldistance / D.z from the
+			// camera): the base ray starts on the near plane, and measuring from there put the
+			// focus at clip start plus the distance, a subject at 0.5 m blurred by 15 pixels.
 			let rayDir = ray.direction;
 			let forward = normalize( ( ${ cameraWorldMatrix } * vec4f( 0.0, 0.0, - 1.0, 0.0 ) ).xyz );
-			let focalPoint = ray.origin + rayDir * ( ${ focusDistance } / dot( rayDir, forward ) );
+			let lens = ( ${ cameraWorldMatrix } * vec4f( 0.0, 0.0, 0.0, 1.0 ) ).xyz;
+			let focalPoint = lens + rayDir * ( ${ focusDistance } / dot( rayDir, forward ) );
+			// how far along the axis the near plane is, to start the new ray there again
+			let nearDistance = dot( ray.origin - lens, forward );
 
 			// sample the aperture shape: under three blades there is no polygon, and Cycles
 			// draws a disk (scene/camera.cpp uploads blades below 3 as 0)
@@ -87,8 +93,12 @@ PhysicalCamera.prototype.getCameraRayFn = function getCameraRayFn() {
 			// the anamorphic ratio divides x alone, as camera_sample_aperture does
 			apertureSample.x /= ${ anamorphicRatio };
 
-			ray.origin += ( ${ cameraWorldMatrix } * vec4f( apertureSample, 0.0, 0.0 ) ).xyz;
-			ray.direction = focalPoint - ray.origin;
+			// from the aperture through the focal point, then back on the near plane: Cycles
+			// clips after the lens, so nothing between the camera and clip start is hit
+			let origin = lens + ( ${ cameraWorldMatrix } * vec4f( apertureSample, 0.0, 0.0 ) ).xyz;
+			let direction = normalize( focalPoint - origin );
+			ray.origin = origin + direction * ( nearDistance / dot( direction, forward ) );
+			ray.direction = direction;
 
 			return true;
 
