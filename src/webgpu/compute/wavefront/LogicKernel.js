@@ -166,14 +166,16 @@ export class LogicKernel extends ComputeKernel {
 					let didHit = hitResult.objectIndex >= 0;
 					let surfaceDist = select( ${ LIGHT_FAR_DISTANCE }, hitResult.dist, didHit );
 
-					// forward hits: a bsdf-sampled segment that lands on a area light. MIS-weighted
-					// only when NEE is also sampling the lights. The camera segment is skipped.
+					// forward hits: a bsdf-sampled segment that lands on an area light, on the sphere of a
+					// sized point or spot, or - when it escapes - on the disc of a sun with an angle, which
+					// sits at LIGHT_FAR_DISTANCE and so is never nearer than a surface. MIS-weighted only
+					// when NEE is also sampling the lights. The camera segment is skipped.
 					if ( input.currentBounce > 0u ) {
 
 						for ( var li = 0u; li < lightsCount; li ++ ) {
 
 							var lightRec: ${ lightRecordStruct };
-							if ( ${ intersectLightAtIndexFn }( input.origin, input.direction, li, &lightRec ) && lightRec.dist < surfaceDist ) {
+							if ( ${ intersectLightAtIndexFn }( input.origin, input.direction, li, &lightRec ) && ( ! didHit || lightRec.dist < surfaceDist ) ) {
 
 								var misWeight = 1.0;
 								if ( misEnabled != 0u ) {

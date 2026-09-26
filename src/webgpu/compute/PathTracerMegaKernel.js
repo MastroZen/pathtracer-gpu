@@ -177,7 +177,8 @@ export class PathTracerMegaKernel extends ComputeKernel {
 						for ( var li = 0u; li < lightsCount; li ++ ) {
 
 							var lightRec: ${ lightRecordStruct };
-							if ( ${ intersectLightAtIndexFn }( ray.origin, ray.direction, li, &lightRec ) && lightRec.dist < surfaceDist ) {
+							// a sun disc sits at LIGHT_FAR_DISTANCE: it is hit only by a ray that escapes
+							if ( ${ intersectLightAtIndexFn }( ray.origin, ray.direction, li, &lightRec ) && ( ! didHit || lightRec.dist < surfaceDist ) ) {
 
 								var misWeight = 1.0;
 								if ( misEnabled != 0u ) {

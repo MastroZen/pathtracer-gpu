@@ -11,12 +11,17 @@ import {
 	SPOT_LIGHT_TYPE,
 	DIR_LIGHT_TYPE,
 	POINT_LIGHT_TYPE,
+	SUN_DISC_LIGHT_TYPE,
 	LIGHT_FAR_DISTANCE,
 	intersectsRectangleFn,
 	intersectsCircleFn,
 	randomAreaLightSampleFn,
 	randomSpotLightSampleFn,
 	randomSphereLightSampleFn,
+	sphereLightHitFn,
+	sunLightHitFn,
+	sunLightOneMinusCosFn,
+	sunLightRadianceFn,
 	getSpotAttenuationFn,
 } from './nodes/lights.wgsl.js';
 import { sampleUniformConeFunc } from './nodes/sampling.wgsl.js';
@@ -91,6 +96,35 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 		// profiles are sampled out of an atlas so filtering must resolve tile-relative wrapping
 		const sampleIesTexelFn = sampleTexelFunc( iesInfoNode, iesProfilesNode, 'sampleIesTexel' );
 
+		// the angular attenuation of a spot along a direction toward the light, cone or IES. One
+		// function for the sample and for the hit of a sized spot: MIS weighs the two, and they must
+		// see the same lamp
+		const spotAttenuationFn = wgslTagFn/* wgsl */`
+			fn spotAttenuation( light: ${ lightStruct }, direction: vec3f ) -> f32 {
+
+				let spotNormal = normalize( cross( light.u, light.v ) );
+				let cosTheta = dot( direction, spotNormal );
+				var attenuation: f32;
+				if ( light.iesProfile >= 0 ) {
+
+					// tilt angle off the forward axis and twist angle around it, with the
+					// tilt axis clamped and the twist axis wrapped ( wrapS = 1, wrapT = 0 )
+					let tiltAngle = acos( cosTheta ) / PI;
+					let twistAngle = ( atan2( dot( direction, light.v ), dot( direction, light.u ) ) + PI ) / ( 2.0 * PI );
+					let packedProfile = ( 1 << 26 ) | light.iesProfile;
+					attenuation = ${ sampleIesTexelFn }( vec2f( tiltAngle, twistAngle ), packedProfile, 0.0 ).r;
+
+				} else {
+
+					attenuation = ${ getSpotAttenuationFn }( light.coneCos, light.penumbraCos, cosTheta );
+
+				}
+
+				return attenuation;
+
+			}
+		`;
+
 		// uniformly pick a light and sample it
 		this.randomLightSample = wgslTagFn/* wgsl */`
 			fn randomLightSample( lightIndex: u32, rayOrigin: vec3f, ruv: vec2f ) -> ${ lightRecordStruct } {
@@ -101,26 +135,7 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 				if ( light.lightType == ${ SPOT_LIGHT_TYPE } ) {
 
 					result = ${ randomSpotLightSampleFn }( light, rayOrigin, ruv );
-
-					let spotNormal = normalize( cross( light.u, light.v ) );
-					let cosTheta = dot( result.direction, spotNormal );
-					var spotAttenuation: f32;
-					if ( light.iesProfile >= 0 ) {
-
-						// tilt angle off the forward axis and twist angle around it, with the
-						// tilt axis clamped and the twist axis wrapped ( wrapS = 1, wrapT = 0 )
-						let tiltAngle = acos( cosTheta ) / PI;
-						let twistAngle = ( atan2( dot( result.direction, light.v ), dot( result.direction, light.u ) ) + PI ) / ( 2.0 * PI );
-						let packedProfile = ( 1 << 26 ) | light.iesProfile;
-						spotAttenuation = ${ sampleIesTexelFn }( vec2f( tiltAngle, twistAngle ), packedProfile, 0.0 ).r;
-
-					} else {
-
-						spotAttenuation = ${ getSpotAttenuationFn }( light.coneCos, light.penumbraCos, cosTheta );
-
-					}
-
-					result.emission *= spotAttenuation;
+					result.emission *= ${ spotAttenuationFn }( light, result.direction );
 
 				} else if ( light.lightType == ${ POINT_LIGHT_TYPE } && light.radius > 0.0 ) {
 
@@ -152,20 +167,23 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 					// the directional light's direction is packed into the u slot
 					result.dist = ${ LIGHT_FAR_DISTANCE };
 					result.direction = light.u;
-					// ── SUN CONE ── the sun has an angular diameter, and the radius slot holds the
-					// tangent of half of it: the disc it would be at unit distance, as Cycles kept it
-					// once. Zero keeps the delta light. The irradiance does not change - a uniform
-					// cone sampled with its own pdf folded in carries exactly the strength.
-					if ( light.radius > 0.0 ) {
-
-						let tanSq = light.radius * light.radius;
-						let oneMinusCos = tanSq / ( 1.0 + tanSq + sqrt( 1.0 + tanSq ) );
-						result.direction = ${ sampleUniformConeFunc }( light.u, oneMinusCos, ruv );
-
-					}
 					result.pdf = 1.0;
 					result.emission = light.color * light.intensity;
 					result.lightType = light.lightType;
+					// ── SUN CONE ── the sun has an angular diameter, and the radius slot holds the
+					// tangent of half of it: the disc it would be at unit distance, as Cycles kept it
+					// once. Zero keeps the delta light. With a size the record carries the radiance of
+					// the disc and the pdf of its cone, which a bsdf-sampled ray finds too (sunLightHit),
+					// so the sun is seen in a mirror and weighed with MIS in a glossy reflection.
+					if ( light.radius > 0.0 ) {
+
+						let oneMinusCos = ${ sunLightOneMinusCosFn }( light );
+						result.direction = ${ sampleUniformConeFunc }( light.u, oneMinusCos, ruv );
+						result.pdf = 1.0 / ( 2.0 * PI * oneMinusCos );
+						result.emission = ${ sunLightRadianceFn }( light );
+						result.lightType = ${ SUN_DISC_LIGHT_TYPE };
+
+					}
 
 				} else {
 
@@ -178,50 +196,83 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 			}
 		`;
 
-		// forward intersection of a ray with a single area light ( rect / circ only ), used for MIS
-		// TODO: support hitting the spot light disk here and move spot lights into the
-		// MIS-weighted set so they appear in sharp reflections
+		// forward intersection of a ray with a single light, used for MIS: the area lights, the sphere
+		// of a point or spot light with a radius, and the disc of a sun with an angle. Delta lights
+		// cannot be hit, and their samples take full weight. A sun disc is at LIGHT_FAR_DISTANCE:
+		// the caller takes it only when the ray escapes the scene
 		this.intersectLightAtIndex = wgslTagFn/* wgsl */`
 			fn intersectLightAtIndex( rayOrigin: vec3f, rayDirection: vec3f, index: u32, lightRec: ptr<function, ${ lightRecordStruct }> ) -> bool {
 
 				let light = ${ bufferNode }[ index ];
+				var hit = false;
 
-				var u = light.u;
-				var v = light.v;
-				let normal = normalize( cross( u, v ) );
+				if ( light.lightType == ${ RECT_AREA_LIGHT_TYPE } || light.lightType == ${ CIRC_AREA_LIGHT_TYPE } ) {
 
-				// only front-facing area lights can be hit
-				if ( dot( normal, rayDirection ) > 0.0 ) {
+					var u = light.u;
+					var v = light.v;
+					let normal = normalize( cross( u, v ) );
 
-					u *= 1.0 / dot( u, u );
-					v *= 1.0 / dot( v, v );
+					// only front-facing area lights can be hit
+					if ( dot( normal, rayDirection ) > 0.0 ) {
 
-					var dist = - 1.0;
-					if ( light.lightType == ${ RECT_AREA_LIGHT_TYPE } ) {
+						u *= 1.0 / dot( u, u );
+						v *= 1.0 / dot( v, v );
 
-						dist = ${ intersectsRectangleFn }( light.position, normal, u, v, rayOrigin, rayDirection );
+						var dist = - 1.0;
+						if ( light.lightType == ${ RECT_AREA_LIGHT_TYPE } ) {
 
-					} else if ( light.lightType == ${ CIRC_AREA_LIGHT_TYPE } ) {
+							dist = ${ intersectsRectangleFn }( light.position, normal, u, v, rayOrigin, rayDirection );
 
-						dist = ${ intersectsCircleFn }( light.position, normal, u, v, rayOrigin, rayDirection );
+						} else {
+
+							dist = ${ intersectsCircleFn }( light.position, normal, u, v, rayOrigin, rayDirection );
+
+						}
+
+						if ( dist > 0.0 ) {
+
+							let cosTheta = dot( rayDirection, normal );
+							lightRec.dist = dist;
+							lightRec.pdf = ( dist * dist ) / ( light.area * cosTheta );
+							lightRec.emission = light.color * light.intensity;
+							lightRec.direction = rayDirection;
+							lightRec.lightType = light.lightType;
+							hit = true;
+
+						}
 
 					}
 
-					if ( dist > 0.0 ) {
+				} else if ( ( light.lightType == ${ POINT_LIGHT_TYPE } || light.lightType == ${ SPOT_LIGHT_TYPE } ) && light.radius > 0.0 ) {
 
-						let cosTheta = dot( rayDirection, normal );
-						lightRec.dist = dist;
-						lightRec.pdf = ( dist * dist ) / ( light.area * cosTheta );
-						lightRec.emission = light.color * light.intensity;
-						lightRec.direction = rayDirection;
-						lightRec.lightType = light.lightType;
-						return true;
+					// the point light keeps its position in the u slot, the spot in position
+					let center = select( light.position, light.u, light.lightType == ${ POINT_LIGHT_TYPE } );
+					var sphereRec = ${ sphereLightHitFn }( light, center, rayOrigin, rayDirection );
+					if ( sphereRec.pdf > 0.0 ) {
+
+						if ( light.lightType == ${ SPOT_LIGHT_TYPE } ) {
+
+							sphereRec.emission *= ${ spotAttenuationFn }( light, rayDirection );
+
+						}
+						*lightRec = sphereRec;
+						hit = true;
+
+					}
+
+				} else if ( light.lightType == ${ DIR_LIGHT_TYPE } && light.radius > 0.0 ) {
+
+					let sunRec = ${ sunLightHitFn }( light, rayDirection );
+					if ( sunRec.pdf > 0.0 ) {
+
+						*lightRec = sunRec;
+						hit = true;
 
 					}
 
 				}
 
-				return false;
+				return hit;
 
 			}
 		`;
