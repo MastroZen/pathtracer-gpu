@@ -8,7 +8,8 @@ import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
-import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
+import { LIGHT_EPSILON, neeLightCountFn } from '../../nodes/lights.wgsl.js';
+import { misHeuristicFn } from '../../nodes/sampling.wgsl.js';
 import { hairSetupFn, hairSigmaFn, hairMelaninFn, hairEvalFn, hairScatterFn } from '../../nodes/hairBsdf.wgsl.js';
 import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '../../nodes/huangBsdf.wgsl.js';
 import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
@@ -23,6 +24,11 @@ export class MaterialKernel extends ComputeKernel {
 		const params = {
 			bvhData: { value: null },
 			material: { value: null },
+			// only their uniforms are read here, to count the NEE slots when the emission a bsdf ray
+			// found is weighed: this kernel has no storage buffer left for anything else
+			envInfo: { value: null },
+			lightsInfo: { value: null },
+			misEnabled: uniform( 1, 'uint' ),
 
 			seed: uniform( 0, 'uint' ),
 			targetDimensions: uniform( new Vector2() ),
@@ -63,6 +69,9 @@ export class MaterialKernel extends ComputeKernel {
 		const sampleMixFactorFn = proxyFn( 'bvhData.value.fns.sampleMixFactor', params );
 		const bsdfSampleFn = proxyFn( 'material.value.bsdfSample', params );
 		const bsdfEvalPdfFn = proxyFn( 'material.value.bsdfEvalPdf', params );
+		const envTotalSumNode = proxy( 'envInfo.value.totalSumNode', params );
+		const lightsCountNode = proxy( 'lightsInfo.value.countNode', params );
+		const emitterCountNode = proxy( 'lightsInfo.value.emitterCountNode', params );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -75,6 +84,7 @@ export class MaterialKernel extends ComputeKernel {
 				maxTransparentBounces: u32,
 				maxBounces: u32,
 				maxSubsurfaceSteps: u32,
+				misEnabled: u32,
 
 				globalId: vec3u
 			) -> void {
@@ -347,6 +357,9 @@ export class MaterialKernel extends ComputeKernel {
 
 					let objectInfo = ${ transformsBuffer }[ u32( input.objectIndex ) ];
 					var materialInfo = ${ materialsBuffer }[ objectInfo.materialIndex ];
+					// the emitter density of the TRIANGLE's material, read before a mix picks another
+					// branch: the table knows only the material the mesh wears. Curves are never in it
+					let emitterAreaPdf = select( materialInfo.emitterAreaPdf, 0.0, input.isCurve == 1u );
 
 					// The surface point is sampled HERE and no longer below: the mix can read
 					// a MASK, and a mask wants the uv of the hit.
@@ -780,7 +793,21 @@ export class MaterialKernel extends ComputeKernel {
 					rayDataStorage[ index ].scatterPdf = select( scatterRec.pdf, 0.0, isTerminated );
 					rayDataStorage[ index ].minPdf = min( input.minPdf, scatterRec.pdf );
 					rayDataStorage[ index ].isFullyTransmissive = input.isFullyTransmissive & select( 0u, 1u, scatterRec.isTransmissive );
-					rayDataStorage[ index ].emission = surface.emission;
+					// -- EMISSION TAKES MIS -- a bsdf ray that lands on a triangle of the emitter table
+					// found light NEE could have sampled too: weigh it with the pdf NEE would have given
+					// this point from the previous vertex. "scatterPdf" and "dist" are still those of the
+					// segment that got here. The camera segment and emitters outside the table keep
+					// full weight
+					var weightedEmission = surface.emission;
+					if ( misEnabled != 0u && input.currentBounce > 0u && emitterAreaPdf > 0.0 ) {
+
+						let lightsDenom = ${ neeLightCountFn }( ${ lightsCountNode }, ${ envTotalSumNode }, ${ emitterCountNode } );
+						let cosLight = abs( dot( input.normal, input.direction ) );
+						let lightPdf = emitterAreaPdf * input.dist * input.dist / max( cosLight, 1e-6 ) / lightsDenom;
+						weightedEmission *= ${ misHeuristicFn }( input.scatterPdf, lightPdf );
+
+					}
+					rayDataStorage[ index ].emission = weightedEmission;
 					rayDataStorage[ index ].currentBounce = newBounce;
 
 					// the NEE shadow ray below still resolves the surface's direct light, so only

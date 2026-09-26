@@ -1,4 +1,5 @@
 import { Box3, DataTexture, LinearFilter, Vector2, Scene, PerspectiveCamera, Color, NoToneMapping, FloatType, Timer, StorageTexture, MeshBasicNodeMaterial, Matrix4, WebGPUCoordinateSystem } from 'three/webgpu';
+import { collectEmitters } from './emitters.js';
 import { uv, uniform, varying } from 'three/tsl';
 import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
 import { ndcToCameraRay, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
@@ -122,6 +123,20 @@ class TextureCache {
 		}
 
 	}
+
+}
+
+// two emitter density maps are the same when they name the same materials with the same numbers
+function sameDensities( a, b ) {
+
+	if ( a.size !== b.size ) return false;
+	for ( const [ material, pdf ] of a ) {
+
+		if ( b.get( material ) !== pdf ) return false;
+
+	}
+
+	return true;
 
 }
 
@@ -763,8 +778,11 @@ export class WebGPUPathTracer {
 
 		} );
 
-		// Build TLAS and compute functions
+		// Build TLAS and compute functions. The emitter table comes first: "update" writes the
+		// material records, and each carries the area density of its material in the table
 		const bvhData = new PathtracerBVHComputeData( scene );
+		const emitters = collectEmitters( scene );
+		bvhData.emitterAreaPdf = emitters.areaPdf;
 		bvhData.update();
 		bvhData.textureAtlas.setTextures( this._renderer, bvhData.textures );
 
@@ -778,6 +796,7 @@ export class WebGPUPathTracer {
 		this.scene = scene;
 		this._bvhData = bvhData;
 		this._pathTracer.setBVHData( bvhData );
+		this._pathTracer.setEmitters?.( emitters );
 		this.setCamera( camera );
 		this.updateEnvironment();
 		this.updateLights();
@@ -887,8 +906,12 @@ export class WebGPUPathTracer {
 	updateMaterials() {
 
 		const { _bvhData, _renderer } = this;
+		// an emission changed is a light changed: the table, and the density each record carries
+		const emitters = collectEmitters( this.scene );
+		_bvhData.emitterAreaPdf = emitters.areaPdf;
 		_bvhData.updateMaterials();
 		_bvhData.textureAtlas.setTextures( _renderer, _bvhData.textures );
+		this._pathTracer.setEmitters?.( emitters );
 		this.reset();
 
 	}
@@ -902,6 +925,25 @@ export class WebGPUPathTracer {
 
 		this.scene.updateMatrixWorld( true );
 		this._bvhData.updateTransforms();
+
+		// the emitters move with their objects, and a scale changes their area and so every density
+		// in the table. Without emitters there is nothing to do, and the records are rewritten only
+		// when a density changed - moving a lamp without scaling it keeps them all
+		const { _bvhData, _renderer } = this;
+		const emitters = collectEmitters( this.scene );
+		if ( emitters.count > 0 || _bvhData.emitterAreaPdf.size > 0 ) {
+
+			if ( ! sameDensities( emitters.areaPdf, _bvhData.emitterAreaPdf ) ) {
+
+				_bvhData.emitterAreaPdf = emitters.areaPdf;
+				_bvhData.updateMaterials();
+				_bvhData.textureAtlas.setTextures( _renderer, _bvhData.textures );
+
+			}
+			this._pathTracer.setEmitters?.( emitters );
+
+		}
+
 		this.reset();
 
 	}

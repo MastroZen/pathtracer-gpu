@@ -10,7 +10,7 @@ import {
 	RNG_INDEX_BACKGROUND_SAMPLE,
 	RNG_INDEX_DIRECT_LIGHT_SAMPLE,
 } from '../../nodes/random.wgsl.js';
-import { ENVIRONMENT_LIGHT_TYPE, LIGHT_FAR_DISTANCE, isMISWeightLightFn } from '../../nodes/lights.wgsl.js';
+import { ENVIRONMENT_LIGHT_TYPE, LIGHT_FAR_DISTANCE, isMISWeightLightFn, neeLightCountFn } from '../../nodes/lights.wgsl.js';
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
 import { rayDataStruct, intersectionResultStruct } from './structs.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
@@ -58,6 +58,8 @@ export class LogicKernel extends ComputeKernel {
 		const lightsCountNode = proxy( 'lightsInfo.value.countNode', params );
 		const randomLightSampleFn = proxyFn( 'lightsInfo.value.randomLightSample', params );
 		const intersectLightAtIndexFn = proxyFn( 'lightsInfo.value.intersectLightAtIndex', params );
+		const emitterCountNode = proxy( 'lightsInfo.value.emitterCountNode', params );
+		const sampleEmitterFn = proxyFn( 'lightsInfo.value.sampleEmitter', params );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -105,12 +107,8 @@ export class LogicKernel extends ComputeKernel {
 				// one-sample NEE selection normalization (lights + env), matched with the megakernel
 				let envActive = ${ envTotalSumNode } > 0.0;
 				let lightsCount = ${ lightsCountNode };
-				var lightsDenom = f32( lightsCount );
-				if ( envActive ) {
-
-					lightsDenom += 1.0;
-
-				}
+				let emitterCount = ${ emitterCountNode };
+				let lightsDenom = ${ neeLightCountFn }( lightsCount, ${ envTotalSumNode }, emitterCount );
 
 				var resultColor = input.resultColor;
 				var throughputColor = input.throughputColor;
@@ -227,6 +225,13 @@ export class LogicKernel extends ComputeKernel {
 								lightRec.pdf = envSample.pdf;
 								lightRec.dist = ${ LIGHT_FAR_DISTANCE };
 								lightRec.lightType = ${ ENVIRONMENT_LIGHT_TYPE };
+
+							} else if ( emitterCount > 0u && lightIndex == lightsCount + select( 0u, 1u, envActive ) ) {
+
+								// the emitter table, one slot of the choice: the fraction of the choice left
+								// over picks the triangle
+								let u = clamp( ruv.x * lightsDenom - f32( lightIndex ), 0.0, 1.0 );
+								lightRec = ${ sampleEmitterFn }( hitResult.position, u, ruv.yz );
 
 							} else {
 

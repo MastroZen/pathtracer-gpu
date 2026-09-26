@@ -18,6 +18,8 @@ export const ENVIRONMENT_LIGHT_TYPE = 5;
 // only for a radius or an angle above zero.
 export const SPHERE_LIGHT_TYPE = 6;
 export const SUN_DISC_LIGHT_TYPE = 7;
+// a point of an emissive triangle, drawn from the emitter table (emitters.js)
+export const EMITTER_LIGHT_TYPE = 8;
 export const LIGHT_FAR_DISTANCE = 1e30;
 
 // tolerance for comparing a shadow hit distance to the sampled light distance
@@ -29,7 +31,21 @@ export const isMISWeightLightFn = wgslFn( /* wgsl */ `
 	fn isMISWeightLight( lightType: i32 ) -> bool {
 
 		return lightType == ${ ENVIRONMENT_LIGHT_TYPE } || lightType == ${ CIRC_AREA_LIGHT_TYPE } || lightType == ${ RECT_AREA_LIGHT_TYPE }
-			|| lightType == ${ SPHERE_LIGHT_TYPE } || lightType == ${ SUN_DISC_LIGHT_TYPE };
+			|| lightType == ${ SPHERE_LIGHT_TYPE } || lightType == ${ SUN_DISC_LIGHT_TYPE } || lightType == ${ EMITTER_LIGHT_TYPE };
+
+	}
+
+` );
+
+// How many slots the one-sample NEE choice has: every analytic light, the environment when it
+// has any energy, and the emitter table when it has any triangle. The logic kernel picks with it
+// and the material kernel divides by it when it weighs the emission a bsdf ray found - one
+// function, so the two never count differently.
+export const neeLightCountFn = wgslFn( /* wgsl */ `
+
+	fn neeLightCount( lightsCount: u32, envTotalSum: f32, emitterCount: u32 ) -> f32 {
+
+		return f32( lightsCount ) + select( 0.0, 1.0, envTotalSum > 0.0 ) + select( 0.0, 1.0, emitterCount > 0u );
 
 	}
 

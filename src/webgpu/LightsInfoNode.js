@@ -12,6 +12,7 @@ import {
 	DIR_LIGHT_TYPE,
 	POINT_LIGHT_TYPE,
 	SUN_DISC_LIGHT_TYPE,
+	EMITTER_LIGHT_TYPE,
 	LIGHT_FAR_DISTANCE,
 	intersectsRectangleFn,
 	intersectsCircleFn,
@@ -25,6 +26,7 @@ import {
 	getSpotAttenuationFn,
 } from './nodes/lights.wgsl.js';
 import { sampleUniformConeFunc } from './nodes/sampling.wgsl.js';
+import { EMITTER_STRIDE } from './emitters.js';
 
 export class LightsInfoNode extends LightsInfoUniformStruct {
 
@@ -42,6 +44,12 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 		this.iesProfilesNode = texture( this.iesAtlas.texture );
 		// named for the same reason as bvh_textureInfo: an id in the name is a new shader
 		this.iesInfoNode = uniformArray( this.iesAtlas.textureInfo, 'uvec4' ).setName( 'iesInfo' );
+
+		// the EMITTER TABLE: emissive triangles as lights (emitters.js), four vec4 each and drawn
+		// by power. Its count is a uniform of its own, zero when no mesh emits
+		this.emitterCountNode = uniform( 0, 'uint' );
+		this.emitterBuffer = new StorageBufferAttribute( new Float32Array( 2 * EMITTER_STRIDE ), 4 );
+		this.emitterBufferNode = storage( this.emitterBuffer, 'vec4' ).toReadOnly().setName( 'emitters' );
 
 		this._initFns();
 
@@ -89,9 +97,26 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 
 	}
 
+	// the table built by collectEmitters, uploaded as is
+	updateEmitters( table ) {
+
+		const { data, count } = table;
+		if ( this.emitterBuffer.array.length < data.length ) {
+
+			this.emitterBuffer = new StorageBufferAttribute( new Float32Array( data.length ), 4 );
+			this.emitterBufferNode.value = this.emitterBuffer;
+
+		}
+
+		this.emitterBuffer.array.set( data );
+		this.emitterBuffer.needsUpdate = true;
+		this.emitterCountNode.value = count;
+
+	}
+
 	_initFns() {
 
-		const { bufferNode, iesProfilesNode, iesInfoNode } = this;
+		const { bufferNode, iesProfilesNode, iesInfoNode, emitterCountNode, emitterBufferNode } = this;
 
 		// profiles are sampled out of an atlas so filtering must resolve tile-relative wrapping
 		const sampleIesTexelFn = sampleTexelFunc( iesInfoNode, iesProfilesNode, 'sampleIesTexel' );
@@ -192,6 +217,73 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 				}
 
 				return result;
+
+			}
+		`;
+
+		// -- NEE ON THE EMITTER TABLE -- a triangle drawn by power, then a point uniform on it. The
+		// pdf is the density per unit area of that triangle's material (luminance over the power of
+		// the table) turned into solid angle, the number MaterialKernel rebuilds when a bsdf ray hits
+		// the same point. A zero pdf is a point seen from the side the raycast refuses, or edge-on
+		this.sampleEmitter = wgslTagFn/* wgsl */`
+			fn sampleEmitter( rayOrigin: vec3f, u: f32, ruv: vec2f ) -> ${ lightRecordStruct } {
+
+				// the first triangle whose cumulative weight passes u
+				var lo = 0u;
+				var hi = ${ emitterCountNode } - 1u;
+				loop {
+
+					if ( lo >= hi ) {
+
+						break;
+
+					}
+					let mid = ( lo + hi ) / 2u;
+					if ( ${ emitterBufferNode }[ mid * 4u ].w > u ) {
+
+						hi = mid;
+
+					} else {
+
+						lo = mid + 1u;
+
+					}
+
+				}
+
+				let a = ${ emitterBufferNode }[ lo * 4u ];
+				let b = ${ emitterBufferNode }[ lo * 4u + 1u ];
+				let c = ${ emitterBufferNode }[ lo * 4u + 2u ];
+				let radiance = ${ emitterBufferNode }[ lo * 4u + 3u ];
+
+				// uniform on the triangle: the square root keeps the density flat
+				let su = sqrt( ruv.x );
+				let p = a.xyz * ( 1.0 - su ) + b.xyz * ( su * ( 1.0 - ruv.y ) ) + c.xyz * ( su * ruv.y );
+				let toPoint = p - rayOrigin;
+				let distSq = dot( toPoint, toPoint );
+				let dist = sqrt( distSq );
+				let direction = toPoint / max( dist, 1e-20 );
+				let normal = normalize( cross( b.xyz - a.xyz, c.xyz - a.xyz ) );
+
+				// the cosine at the emitter on the side the raycast accepts: c.w is 1 front, -1 back,
+				// 0 both, already turned around for a mirroring transform
+				let cosLight = dot( normal, - direction );
+				let facing = select( cosLight * c.w, abs( cosLight ), c.w == 0.0 );
+
+				var lightRec: ${ lightRecordStruct };
+				lightRec.lightType = ${ EMITTER_LIGHT_TYPE };
+				lightRec.direction = direction;
+				// the shadow ray stops short of the emitter, or its own triangle would shadow it
+				lightRec.dist = dist * ( 1.0 - 1e-4 );
+				lightRec.emission = radiance.xyz;
+				lightRec.pdf = 0.0;
+				if ( facing > 1e-6 && distSq > 1e-12 ) {
+
+					lightRec.pdf = b.w * distSq / facing;
+
+				}
+
+				return lightRec;
 
 			}
 		`;

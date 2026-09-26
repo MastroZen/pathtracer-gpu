@@ -1,4 +1,4 @@
-import { BackSide, FrontSide, DoubleSide, BufferAttribute, BufferGeometry, StorageBufferAttribute, StructTypeNode, Vector4, SkinnedMesh, RepeatWrapping, ClampToEdgeWrapping, MirroredRepeatWrapping, NearestFilter } from 'three/webgpu';
+import { BufferAttribute, BufferGeometry, StorageBufferAttribute, StructTypeNode, Vector4, SkinnedMesh, RepeatWrapping, ClampToEdgeWrapping, MirroredRepeatWrapping, NearestFilter } from 'three/webgpu';
 import { BVHComputeData, intersectRayTriangle, bvhNodeBoundsStruct, bvhNodeStruct, rayStruct, rayIntersectionResultStruct as intersectionResultStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { storage, float, texture, uniformArray, uint } from 'three/tsl';
 import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
@@ -7,6 +7,7 @@ import { getTextureHash } from '../../core/utils/sceneUpdateUtils.js';
 import { sampleTexelFunc } from './utils.wgsl.js';
 import { getSurfaceRecordFunc, mixFactorFunc } from './material.wgsl.js';
 import { AtlasTexture } from '../AtlasTexture.js';
+import { materialSideValue } from '../emitters.js';
 
 const _colorVec = new Vector4();
 const transformStruct = new StructTypeNode( {
@@ -40,6 +41,9 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.structs.material = materialStruct;
 		this.storage.materials = null;
 		this.materialsMap = new Map();
+		// material -> area density in the emitter table, written into each material record;
+		// set by the path tracer from collectEmitters before it rewrites the materials
+		this.emitterAreaPdf = new Map();
 		this.materials = [];
 		this.bvhMap = new Map();
 		this.textureAtlas = new AtlasTexture();
@@ -824,28 +828,9 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			floatArray[ index ++ ] = m.opacity;
 			floatArray[ index ++ ] = m.alphaTest;
 
-			// side & matte - offset 52
-			if ( ! isThinWall && m.transmission > 0.0 ) {
-
-				floatArray[ index ++ ] = 0;
-
-			} else {
-
-				switch ( m.side ) {
-
-					case FrontSide:
-						floatArray[ index ++ ] = 1;
-						break;
-					case BackSide:
-						floatArray[ index ++ ] = - 1;
-						break;
-					case DoubleSide:
-						floatArray[ index ++ ] = 0;
-						break;
-
-				}
-
-			}
+			// side & matte - offset 52: one definition shared with the emitter table, so the side
+			// NEE samples is the side the raycast accepts
+			floatArray[ index ++ ] = materialSideValue( m );
 
 			intArray[ index ++ ] = Number( getField( m, 'matte', false ) ); // matte
 			floatArray[ index ++ ] = getField( m, 'sheen', 0.0 );
@@ -992,8 +977,9 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			floatArray[ index ++ ] = hairAbsorption ? hairAbsorption.y : 0.52;
 			floatArray[ index ++ ] = hairAbsorption ? hairAbsorption.z : 1.365;
 
+			// the area density of this material in the emitter table, zero when it is not a light
+			floatArray[ index ++ ] = this.emitterAreaPdf.get( m ) ?? 0.0;
 			// il riempimento che porta il record al passo della struct: vedi structs.wgsl.js
-			floatArray[ index ++ ] = 0.0;
 			floatArray[ index ++ ] = 0.0;
 
 			if ( index - recordStart !== recordLength ) {

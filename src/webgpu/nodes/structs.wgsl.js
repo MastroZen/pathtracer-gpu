@@ -249,10 +249,15 @@ export const materialStruct = new StructTypeNode( {
 	hairAbsorptionR: 'float',
 	hairAbsorptionG: 'float',
 	hairAbsorptionB: 'float',
+	// The density per unit area with which next event estimation picks a point of this
+	// material, when its triangles are in the emitter table (emitters.js): the luminance of
+	// its emission over the power of the whole table. Zero keeps its emission bsdf-sampled
+	// at full weight. It took the first of the two padding words, so the record keeps its
+	// size.
+	emitterAreaPdf: 'float',
 	// e il RIEMPIMENTO che porta il record al passo della struct: i `vec3` la
 	// allineano a quattro float, quindi il totale va tenuto multiplo di quattro.
 	// Il controllo a runtime nel writer conta le parole scritte e le confronta.
-	_hairAlignment0: 'float',
 	_hairAlignment1: 'float',
 	// total size = 304
 }, 'Material' );
