@@ -50,6 +50,7 @@ export class EquirectHdrInfoNode extends EquirectHdrInfoUniform {
 		this.rotationNode = uniform( new Matrix3() );
 		this.intensityNode = uniform( 1 );
 		this.totalSumNode = uniform( this.totalSum );
+		this.meanRadianceNode = uniform( this.meanRadiance );
 
 		// ── SUN GUIDING: a cone of directions sampled on its own ──
 		//
@@ -123,6 +124,7 @@ export class EquirectHdrInfoNode extends EquirectHdrInfoUniform {
 		// refresh values in place on the existing nodes so no rebuild is required
 		mapNode.value = this.map;
 		totalSumNode.value = this.totalSum;
+		this.meanRadianceNode.value = this.meanRadiance;
 
 	}
 

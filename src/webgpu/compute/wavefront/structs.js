@@ -100,6 +100,10 @@ export const rayDataStruct = new StructTypeNode( {
 	// LogicKernel dal risultato della tracciatura, e lo legge MaterialKernel
 	isCurve: 'uint',
 
+	// the probability the NEE choice gave the emitter table at the vertex the traced segment
+	// left: LogicKernel writes it, MaterialKernel weighs the emission of the surface with it
+	emitterSelectPdf: 'float',
+
 
 }, 'RayData' );
 

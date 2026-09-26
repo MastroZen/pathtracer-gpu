@@ -97,7 +97,7 @@ function rangesOf( mesh ) {
  * Builds the emitter table of a scene.
  *
  * @param {import('three').Object3D} root
- * @returns {{ data: Float32Array, count: number, totalPower: number, areaPdf: Map<import('three').Material, number> }}
+ * @returns {{ data: Float32Array, count: number, totalPower: number, areaPdf: Map<import('three').Material, number>, bounds: number[] }}
  */
 export function collectEmitters( root ) {
 
@@ -175,6 +175,29 @@ export function collectEmitters( root ) {
 
 	}
 
+	// the bounding sphere of the table: NEE weighs the whole table as its power over the squared
+	// distance to it when it picks which light to sample
+	const min = [ Infinity, Infinity, Infinity ], max = [ - Infinity, - Infinity, - Infinity ];
+	for ( const e of entries ) {
+
+		for ( const v of [ e.a, e.b, e.c ] ) {
+
+			for ( let k = 0; k < 3; k ++ ) {
+
+				min[ k ] = Math.min( min[ k ], v[ k ] );
+				max[ k ] = Math.max( max[ k ], v[ k ] );
+
+			}
+
+		}
+
+	}
+
+	const bounds = entries.length === 0 ? [ 0, 0, 0, 0 ] : [
+		( min[ 0 ] + max[ 0 ] ) / 2, ( min[ 1 ] + max[ 1 ] ) / 2, ( min[ 2 ] + max[ 2 ] ) / 2,
+		0.5 * Math.hypot( max[ 0 ] - min[ 0 ], max[ 1 ] - min[ 1 ], max[ 2 ] - min[ 2 ] ),
+	];
+
 	const areaPdf = new Map();
 	const data = new Float32Array( Math.max( entries.length, 2 ) * EMITTER_STRIDE );
 	let cumulative = 0;
@@ -197,6 +220,6 @@ export function collectEmitters( root ) {
 
 	} );
 
-	return { data, count: entries.length, totalPower, areaPdf };
+	return { data, count: entries.length, totalPower, areaPdf, bounds };
 
 }

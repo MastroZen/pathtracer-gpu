@@ -37,15 +37,32 @@ export const isMISWeightLightFn = wgslFn( /* wgsl */ `
 
 ` );
 
-// How many slots the one-sample NEE choice has: every analytic light, the environment when it
-// has any energy, and the emitter table when it has any triangle. The logic kernel picks with it
-// and the material kernel divides by it when it weighs the emission a bsdf ray found - one
-// function, so the two never count differently.
-export const neeLightCountFn = wgslFn( /* wgsl */ `
+// -- THE NEE CHOICE BY IMPORTANCE --
+//
+// One-sample NEE picks one slot - an analytic light, the environment, the emitter table - and
+// divides by the probability of that pick. Picking them uniformly spent the samples evenly on
+// lights that give very different amounts of light: measured on a small bright panel, a world at
+// zero strength doubled the noise, and a dim sky with three dim lamps quadrupled it (fifteen times
+// the samples for the same noise). Each slot now weighs an estimate of the irradiance it brings to
+// the shading point (LightsInfoNode), which is what the light tree of Cycles computes at its
+// leaves, without the tree.
+//
+// The probability mixes that weight with a uniform share over the ACTIVE slots, so that no light
+// that emits is ever left at zero where the estimate says it gives nothing - a spot seen from
+// behind the point that receives it, the back of an area light, an estimate that is simply wrong.
+// A zero probability for a light that does contribute is bias; a small one is only noise.
+//
+// Branch-free on purpose: an early return inside a function the tracing loop inlines has already
+// cost a lost device on the D3D11 backend.
+export const NEE_UNIFORM_SHARE = 0.1;
+export const neeSlotProbabilityFn = wgslFn( /* wgsl */ `
 
-	fn neeLightCount( lightsCount: u32, envTotalSum: f32, emitterCount: u32 ) -> f32 {
+	fn neeSlotProbability( weight: f32, isActive: bool, totals: vec2f ) -> f32 {
 
-		return f32( lightsCount ) + select( 0.0, 1.0, envTotalSum > 0.0 ) + select( 0.0, 1.0, emitterCount > 0u );
+		// totals: the sum of the weights, and the number of active slots
+		let uniformShare = select( 0.0, 1.0 / max( totals.y, 1.0 ), isActive );
+		let importance = select( uniformShare, weight / max( totals.x, 1e-30 ), totals.x > 0.0 );
+		return select( 0.0, ( 1.0 - ${ NEE_UNIFORM_SHARE } ) * importance + ${ NEE_UNIFORM_SHARE } * uniformShare, isActive );
 
 	}
 

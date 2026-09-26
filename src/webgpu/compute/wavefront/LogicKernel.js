@@ -10,7 +10,7 @@ import {
 	RNG_INDEX_BACKGROUND_SAMPLE,
 	RNG_INDEX_DIRECT_LIGHT_SAMPLE,
 } from '../../nodes/random.wgsl.js';
-import { ENVIRONMENT_LIGHT_TYPE, LIGHT_FAR_DISTANCE, isMISWeightLightFn, neeLightCountFn } from '../../nodes/lights.wgsl.js';
+import { ENVIRONMENT_LIGHT_TYPE, LIGHT_FAR_DISTANCE, isMISWeightLightFn, neeSlotProbabilityFn } from '../../nodes/lights.wgsl.js';
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
 import { rayDataStruct, intersectionResultStruct } from './structs.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
@@ -48,7 +48,8 @@ export class LogicKernel extends ComputeKernel {
 		};
 
 		// environment + background resources pulled off their providers (embedded functions)
-		const envTotalSumNode = proxy( 'envInfo.value.totalSumNode', params );
+		const envMeanRadianceNode = proxy( 'envInfo.value.meanRadianceNode', params );
+		const envIntensityNode = proxy( 'envInfo.value.intensityNode', params );
 		const sampleEnvColor = proxy( 'envInfo.value.sampleColor', params );
 		const sampleEnvDir = proxy( 'envInfo.value.sampleDir', params );
 		const getEnvDirPdf = proxy( 'envInfo.value.getDirPdf', params );
@@ -60,6 +61,10 @@ export class LogicKernel extends ComputeKernel {
 		const intersectLightAtIndexFn = proxyFn( 'lightsInfo.value.intersectLightAtIndex', params );
 		const emitterCountNode = proxy( 'lightsInfo.value.emitterCountNode', params );
 		const sampleEmitterFn = proxyFn( 'lightsInfo.value.sampleEmitter', params );
+		const lightSlotWeightFn = proxyFn( 'lightsInfo.value.lightSlotWeight', params );
+		const lightSlotActiveFn = proxyFn( 'lightsInfo.value.lightSlotActive', params );
+		const emitterSlotWeightFn = proxyFn( 'lightsInfo.value.emitterSlotWeight', params );
+		const neeTotalsFn = proxyFn( 'lightsInfo.value.neeTotals', params );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -104,11 +109,13 @@ export class LogicKernel extends ComputeKernel {
 				let indexUV = vec2u( input.pixelIndex >> 16, input.pixelIndex & 0xFFFF );
 				${ rngInit }( indexUV, input.seed, input.currentBounce + input.alphaDepth );
 
-				// one-sample NEE selection normalization (lights + env), matched with the megakernel
-				let envActive = ${ envTotalSumNode } > 0.0;
+				// the environment as a NEE slot: its weight is the irradiance a uniform world of its mean
+				// radiance would give, pi times it, and its STRENGTH counts - a world at zero strength has
+				// energy in its map and none in the scene, and took half the samples for nothing
+				let envWeight = 3.14159265 * ${ envMeanRadianceNode } * ${ envIntensityNode };
+				let envActive = envWeight > 0.0;
 				let lightsCount = ${ lightsCountNode };
 				let emitterCount = ${ emitterCountNode };
-				let lightsDenom = ${ neeLightCountFn }( lightsCount, ${ envTotalSumNode }, emitterCount );
 
 				var resultColor = input.resultColor;
 				var throughputColor = input.throughputColor;
@@ -168,6 +175,10 @@ export class LogicKernel extends ComputeKernel {
 					let didHit = hitResult.objectIndex >= 0;
 					let surfaceDist = select( ${ LIGHT_FAR_DISTANCE }, hitResult.dist, didHit );
 
+					// the NEE choice as it was made at the vertex this segment left: what a light found by
+					// the segment is weighed against
+					let originTotals = ${ neeTotalsFn }( input.origin, envWeight );
+
 					// forward hits: a segment that lands on an area light, on the sphere of a sized point
 					// or spot, or - when it escapes - on the disc of a sun with an angle, which sits at
 					// LIGHT_FAR_DISTANCE and so is never nearer than a surface.
@@ -185,8 +196,8 @@ export class LogicKernel extends ComputeKernel {
 							var misWeight = 1.0;
 							if ( misEnabled != 0u && input.currentBounce > 0u ) {
 
-								let lightPdf = lightRec.pdf / lightsDenom;
-								misWeight = ${ misHeuristicFn }( input.scatterPdf, lightPdf );
+								let choice = ${ neeSlotProbabilityFn }( ${ lightSlotWeightFn }( li, input.origin ), ${ lightSlotActiveFn }( li ), originTotals );
+								misWeight = ${ misHeuristicFn }( input.scatterPdf, lightRec.pdf * choice );
 
 							}
 
@@ -210,16 +221,85 @@ export class LogicKernel extends ComputeKernel {
 						rayDataStorage[ index ].objectIndex = hitResult.objectIndex;
 						rayDataStorage[ index ].dist = hitResult.dist;
 
-						// next event estimation: pick one light or the environment with a single sample.
-						// MaterialKernel evaluates the bsdf and enqueues the shadow ray.
-						// TODO: importance-sample the selection by light intensity and solid angle
+						// the emitter slot's probability at the vertex this segment left, for MaterialKernel,
+						// which weighs the emission of this surface and has no room for the lights buffer
+						rayDataStorage[ index ].emitterSelectPdf = ${ neeSlotProbabilityFn }( ${ emitterSlotWeightFn }( input.origin ), emitterCount > 0u, originTotals );
+
+						// next event estimation: pick one slot by importance (neeSlotProbability) with a single
+						// sample. MaterialKernel evaluates the bsdf and enqueues the shadow ray.
 						var lightPdf = 0.0;
-						if ( misEnabled != 0u && lightsDenom > 0.0 ) {
+						let totals = ${ neeTotalsFn }( hitResult.position, envWeight );
+						if ( misEnabled != 0u && totals.y > 0.0 ) {
 
 							let ruv = ${ rand3 }( ${ RNG_INDEX_DIRECT_LIGHT_SAMPLE } );
-							let lightIndex = min( u32( ruv.x * lightsDenom ), u32( lightsDenom ) - 1u );
+
+							// walk the slots in a fixed order - lights, environment, table - to the one whose
+							// share of [0, 1) holds the sample. The last active slot catches what rounding
+							// leaves past the end
+							// "found" is its own flag: the environment and the table are the negative slots -2
+							// and -3, so the sign of "chosen" cannot also say whether anything was picked
+							var found = false;
+							var chosen = - 1;
+							var chosenProbability = 0.0;
+							var remainder = 0.0;
+							var cumulative = 0.0;
+							var lastActive = - 1;
+							var lastProbability = 0.0;
+							for ( var li = 0u; li < lightsCount; li ++ ) {
+
+								let probability = ${ neeSlotProbabilityFn }( ${ lightSlotWeightFn }( li, hitResult.position ), ${ lightSlotActiveFn }( li ), totals );
+								if ( ! found && probability > 0.0 && ruv.x < cumulative + probability ) {
+
+									found = true;
+									chosen = i32( li );
+									chosenProbability = probability;
+
+								}
+								if ( probability > 0.0 ) {
+
+									lastActive = i32( li );
+									lastProbability = probability;
+
+								}
+								cumulative += probability;
+
+							}
+
+							let envProbability = ${ neeSlotProbabilityFn }( envWeight, envActive, totals );
+							if ( ! found && envProbability > 0.0 && ruv.x < cumulative + envProbability ) {
+
+								found = true;
+								chosen = - 2;
+								chosenProbability = envProbability;
+
+							}
+							if ( envProbability > 0.0 ) {
+
+								lastActive = - 2;
+								lastProbability = envProbability;
+
+							}
+							cumulative += envProbability;
+
+							let emitterProbability = ${ neeSlotProbabilityFn }( ${ emitterSlotWeightFn }( hitResult.position ), emitterCount > 0u, totals );
+							if ( ! found && emitterProbability > 0.0 ) {
+
+								found = true;
+								chosen = - 3;
+								chosenProbability = emitterProbability;
+								// the fraction of the pick left over picks the triangle
+								remainder = clamp( ( ruv.x - cumulative ) / emitterProbability, 0.0, 1.0 );
+
+							}
+							if ( ! found ) {
+
+								chosen = lastActive;
+								chosenProbability = lastProbability;
+
+							}
+
 							var lightRec: ${ lightRecordStruct };
-							if ( envActive && lightIndex == lightsCount ) {
+							if ( chosen == - 2 ) {
 
 								// the environment, sampled from its CDF, as a light of kind ENVIRONMENT
 								let envSample = ${ sampleEnvDir }( ruv.yz );
@@ -230,20 +310,17 @@ export class LogicKernel extends ComputeKernel {
 								lightRec.dist = ${ LIGHT_FAR_DISTANCE };
 								lightRec.lightType = ${ ENVIRONMENT_LIGHT_TYPE };
 
-							} else if ( emitterCount > 0u && lightIndex == lightsCount + select( 0u, 1u, envActive ) ) {
+							} else if ( chosen == - 3 ) {
 
-								// the emitter table, one slot of the choice: the fraction of the choice left
-								// over picks the triangle
-								let u = clamp( ruv.x * lightsDenom - f32( lightIndex ), 0.0, 1.0 );
-								lightRec = ${ sampleEmitterFn }( hitResult.position, u, ruv.yz );
+								lightRec = ${ sampleEmitterFn }( hitResult.position, remainder, ruv.yz );
 
 							} else {
 
-								lightRec = ${ randomLightSampleFn }( lightIndex, hitResult.position, ruv.yz );
+								lightRec = ${ randomLightSampleFn }( u32( chosen ), hitResult.position, ruv.yz );
 
 							}
 
-							lightPdf = lightRec.pdf / lightsDenom;
+							lightPdf = lightRec.pdf * chosenProbability;
 							rayDataStorage[ index ].lightDirection = lightRec.direction;
 							rayDataStorage[ index ].lightEmission = lightRec.emission;
 							rayDataStorage[ index ].lightDist = lightRec.dist;
@@ -262,8 +339,9 @@ export class LogicKernel extends ComputeKernel {
 							var misWeight = 1.0;
 							if ( misEnabled != 0u && envActive ) {
 
-								// match the env pdf scaling used by the NEE selection so the two estimators balance
-								let envPdf = ${ getEnvDirPdf }( input.direction ) / lightsDenom;
+								// the probability NEE gave the environment at the vertex the segment left, so the
+								// two estimators balance
+								let envPdf = ${ getEnvDirPdf }( input.direction ) * ${ neeSlotProbabilityFn }( envWeight, envActive, originTotals );
 								misWeight = ${ misHeuristicFn }( input.scatterPdf, envPdf );
 
 							}
@@ -294,7 +372,9 @@ export class LogicKernel extends ComputeKernel {
 								var misWeight = 1.0;
 								if ( misEnabled != 0u && envActive ) {
 
-									let envPdf = ${ getEnvDirPdf }( input.direction );
+									// with the probability of its slot, as in the opaque branch: without it the two
+									// weights did not add up to one when other lights shared the choice
+									let envPdf = ${ getEnvDirPdf }( input.direction ) * ${ neeSlotProbabilityFn }( envWeight, envActive, originTotals );
 									misWeight = ${ misHeuristicFn }( input.scatterPdf, envPdf );
 
 								}

@@ -1,5 +1,5 @@
 import { storage, uniform, uniformArray, texture } from 'three/tsl';
-import { StorageBufferAttribute, HalfFloatType } from 'three/webgpu';
+import { StorageBufferAttribute, HalfFloatType, Vector4 } from 'three/webgpu';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { AtlasTexture } from './AtlasTexture.js';
 import { LightsInfoUniformStruct } from '../uniforms/LightsInfoUniformStruct.js';
@@ -24,6 +24,7 @@ import {
 	sunLightOneMinusCosFn,
 	sunLightRadianceFn,
 	getSpotAttenuationFn,
+	getDistanceAttenuationFn,
 } from './nodes/lights.wgsl.js';
 import { sampleUniformConeFunc } from './nodes/sampling.wgsl.js';
 import { EMITTER_STRIDE } from './emitters.js';
@@ -48,6 +49,10 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 		// the EMITTER TABLE: emissive triangles as lights (emitters.js), four vec4 each and drawn
 		// by power. Its count is a uniform of its own, zero when no mesh emits
 		this.emitterCountNode = uniform( 0, 'uint' );
+		// its power (area times luminance, summed) and its bounding sphere: how NEE weighs the whole
+		// table against the other lights when it picks one
+		this.emitterPowerNode = uniform( 0 );
+		this.emitterBoundsNode = uniform( new Vector4() );
 		this.emitterBuffer = new StorageBufferAttribute( new Float32Array( 2 * EMITTER_STRIDE ), 4 );
 		this.emitterBufferNode = storage( this.emitterBuffer, 'vec4' ).toReadOnly().setName( 'emitters' );
 
@@ -111,12 +116,14 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 		this.emitterBuffer.array.set( data );
 		this.emitterBuffer.needsUpdate = true;
 		this.emitterCountNode.value = count;
+		this.emitterPowerNode.value = table.totalPower;
+		this.emitterBoundsNode.value.fromArray( table.bounds );
 
 	}
 
 	_initFns() {
 
-		const { bufferNode, iesProfilesNode, iesInfoNode, emitterCountNode, emitterBufferNode } = this;
+		const { bufferNode, iesProfilesNode, iesInfoNode, countNode, emitterCountNode, emitterBufferNode, emitterPowerNode, emitterBoundsNode } = this;
 
 		// profiles are sampled out of an atlas so filtering must resolve tile-relative wrapping
 		const sampleIesTexelFn = sampleTexelFunc( iesInfoNode, iesProfilesNode, 'sampleIesTexel' );
@@ -217,6 +224,95 @@ export class LightsInfoNode extends LightsInfoUniformStruct {
 				}
 
 				return result;
+
+			}
+		`;
+
+		// -- THE WEIGHTS OF THE NEE CHOICE -- an estimate of the irradiance each slot brings to a point
+		// (see neeSlotProbability): a lamp its intensity over d^2 (never nearer than its radius or a
+		// centimetre), a spot the same through its cone, the sun its strength, an area light its
+		// radiance times its area over d^2 on the side it faces, the emitter table its power over the
+		// squared distance to its bounding sphere. The environment is weighed by the kernel, which owns
+		// its uniforms. The same functions serve the pick and the hit: MIS needs both to agree
+		this.lightSlotWeight = wgslTagFn/* wgsl */`
+			fn lightSlotWeight( index: u32, x: vec3f ) -> f32 {
+
+				let light = ${ bufferNode }[ index ];
+				let power = dot( light.color, vec3f( 0.2126, 0.7152, 0.0722 ) ) * light.intensity;
+				var weight = power;
+				if ( light.lightType == ${ POINT_LIGHT_TYPE } || light.lightType == ${ SPOT_LIGHT_TYPE } ) {
+
+					let center = select( light.position, light.u, light.lightType == ${ POINT_LIGHT_TYPE } );
+					let toLight = center - x;
+					let dist = sqrt( dot( toLight, toLight ) );
+					weight = power * ${ getDistanceAttenuationFn }( max( dist, max( light.radius, 0.01 ) ), light.distance, light.decay );
+					if ( light.lightType == ${ SPOT_LIGHT_TYPE } ) {
+
+						weight *= ${ spotAttenuationFn }( light, toLight / max( dist, 1e-20 ) );
+
+					}
+
+				} else if ( light.lightType == ${ RECT_AREA_LIGHT_TYPE } || light.lightType == ${ CIRC_AREA_LIGHT_TYPE } ) {
+
+					let normal = normalize( cross( light.u, light.v ) );
+					let toLight = light.position - x;
+					let distSq = dot( toLight, toLight );
+					let cosLight = max( dot( toLight / sqrt( max( distSq, 1e-20 ) ), normal ), 0.0 );
+					weight = power * light.area * cosLight / max( distSq, light.area );
+
+				}
+
+				return max( weight, 0.0 );
+
+			}
+		`;
+
+		// a light that emits nothing is not a slot: sampling it would only spend samples
+		this.lightSlotActive = wgslTagFn/* wgsl */`
+			fn lightSlotActive( index: u32 ) -> bool {
+
+				let light = ${ bufferNode }[ index ];
+				return dot( light.color, vec3f( 0.2126, 0.7152, 0.0722 ) ) * light.intensity > 0.0;
+
+			}
+		`;
+
+		this.emitterSlotWeight = wgslTagFn/* wgsl */`
+			fn emitterSlotWeight( x: vec3f ) -> f32 {
+
+				let bounds = ${ emitterBoundsNode };
+				let toCenter = bounds.xyz - x;
+				return ${ emitterPowerNode } / max( dot( toCenter, toCenter ), max( bounds.w * bounds.w, 1e-8 ) );
+
+			}
+		`;
+
+		// the sum of the weights and the number of active slots at a point
+		this.neeTotals = wgslTagFn/* wgsl */`
+			fn neeTotals( x: vec3f, envWeight: f32 ) -> vec2f {
+
+				var total = 0.0;
+				var activeCount = 0.0;
+				for ( var i = 0u; i < ${ countNode }; i ++ ) {
+
+					total += ${ this.lightSlotWeight }( i, x );
+					activeCount += select( 0.0, 1.0, ${ this.lightSlotActive }( i ) );
+
+				}
+				if ( envWeight > 0.0 ) {
+
+					total += envWeight;
+					activeCount += 1.0;
+
+				}
+				if ( ${ emitterCountNode } > 0u ) {
+
+					total += ${ this.emitterSlotWeight }( x );
+					activeCount += 1.0;
+
+				}
+
+				return vec2f( total, activeCount );
 
 			}
 		`;

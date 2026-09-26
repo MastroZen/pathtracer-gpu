@@ -88,8 +88,6 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.logicKernel.envInfo = this.envInfo;
 		this.logicKernel.backgroundInfo = this.backgroundInfo;
 		this.logicKernel.lightsInfo = this.lightsInfo;
-		this.materialKernel.envInfo = this.envInfo;
-		this.materialKernel.lightsInfo = this.lightsInfo;
 
 		// clear kernels
 		this.zeroDispatchKernel = new ZeroOutBufferKernel().setWorkgroupSize( 1, 1, 1 );

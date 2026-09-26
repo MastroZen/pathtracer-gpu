@@ -170,6 +170,7 @@ export class EquirectHdrInfoUniform {
 		this.marginalWeights = marginalWeights;
 		this.conditionalWeights = conditionalWeights;
 		this.totalSum = 0;
+		this.meanRadiance = 0;
 
 		// TODO: Add support for float or half float types here. We need to pass this into
 		// the preprocess function and ensure our CDF and MDF textures are appropriately sized
@@ -213,9 +214,13 @@ export class EquirectHdrInfoUniform {
 		const cdfMarginal = new Float32Array( height );
 
 		let totalSumValue = 0.0;
+		// the mean radiance over the sphere, each row weighed by its solid angle: what NEE compares
+		// with the lights when it picks which one to sample (LightsInfoNode)
+		let solidAngleSum = 0.0;
 		let cumulativeWeightMarginal = 0.0;
 		for ( let y = 0; y < height; y ++ ) {
 
+			const rowSolidAngle = Math.sin( Math.PI * ( y + 0.5 ) / height ) * ( 2 * Math.PI / width ) * ( Math.PI / height );
 			let cumulativeRowWeight = 0.0;
 			for ( let x = 0; x < width; x ++ ) {
 
@@ -229,6 +234,7 @@ export class EquirectHdrInfoUniform {
 				const weight = this.getPixelWeight( r, g, b, y, height );
 				cumulativeRowWeight += weight;
 				totalSumValue += weight;
+				solidAngleSum += weight * rowSolidAngle;
 
 				pdfConditional[ i ] = weight;
 				cdfConditional[ i ] = cumulativeRowWeight;
@@ -310,6 +316,7 @@ export class EquirectHdrInfoUniform {
 		conditionalWeights.needsUpdate = true;
 
 		this.totalSum = totalSumValue;
+		this.meanRadiance = solidAngleSum / ( 4 * Math.PI );
 		this.map = map;
 
 		// ── THE CDFs THEMSELVES, kept for exact sampling ──

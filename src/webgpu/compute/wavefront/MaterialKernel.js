@@ -8,7 +8,7 @@ import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
-import { LIGHT_EPSILON, neeLightCountFn } from '../../nodes/lights.wgsl.js';
+import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 import { misHeuristicFn } from '../../nodes/sampling.wgsl.js';
 import { hairSetupFn, hairSigmaFn, hairMelaninFn, hairEvalFn, hairScatterFn } from '../../nodes/hairBsdf.wgsl.js';
 import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '../../nodes/huangBsdf.wgsl.js';
@@ -24,10 +24,6 @@ export class MaterialKernel extends ComputeKernel {
 		const params = {
 			bvhData: { value: null },
 			material: { value: null },
-			// only their uniforms are read here, to count the NEE slots when the emission a bsdf ray
-			// found is weighed: this kernel has no storage buffer left for anything else
-			envInfo: { value: null },
-			lightsInfo: { value: null },
 			misEnabled: uniform( 1, 'uint' ),
 
 			seed: uniform( 0, 'uint' ),
@@ -69,9 +65,6 @@ export class MaterialKernel extends ComputeKernel {
 		const sampleMixFactorFn = proxyFn( 'bvhData.value.fns.sampleMixFactor', params );
 		const bsdfSampleFn = proxyFn( 'material.value.bsdfSample', params );
 		const bsdfEvalPdfFn = proxyFn( 'material.value.bsdfEvalPdf', params );
-		const envTotalSumNode = proxy( 'envInfo.value.totalSumNode', params );
-		const lightsCountNode = proxy( 'lightsInfo.value.countNode', params );
-		const emitterCountNode = proxy( 'lightsInfo.value.emitterCountNode', params );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -796,14 +789,14 @@ export class MaterialKernel extends ComputeKernel {
 					// -- EMISSION TAKES MIS -- a bsdf ray that lands on a triangle of the emitter table
 					// found light NEE could have sampled too: weigh it with the pdf NEE would have given
 					// this point from the previous vertex. "scatterPdf" and "dist" are still those of the
-					// segment that got here. The camera segment and emitters outside the table keep
-					// full weight
+					// segment that got here, and LogicKernel left the probability the NEE choice gave
+					// the table at that vertex: this kernel has no room for the lights buffer to work it
+					// out. The camera segment and emitters outside the table keep full weight
 					var weightedEmission = surface.emission;
 					if ( misEnabled != 0u && input.currentBounce > 0u && emitterAreaPdf > 0.0 ) {
 
-						let lightsDenom = ${ neeLightCountFn }( ${ lightsCountNode }, ${ envTotalSumNode }, ${ emitterCountNode } );
 						let cosLight = abs( dot( input.normal, input.direction ) );
-						let lightPdf = emitterAreaPdf * input.dist * input.dist / max( cosLight, 1e-6 ) / lightsDenom;
+						let lightPdf = emitterAreaPdf * input.dist * input.dist / max( cosLight, 1e-6 ) * input.emitterSelectPdf;
 						weightedEmission *= ${ misHeuristicFn }( input.scatterPdf, lightPdf );
 
 					}
