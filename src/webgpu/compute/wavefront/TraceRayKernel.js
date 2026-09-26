@@ -49,7 +49,12 @@ export class TraceRayKernel extends ComputeKernel {
 
 				}
 
-				let queuedRay = rayQueue.elements[ index ];
+				// A whole element is read from the BUFFER, never through the pointer alias
+				// above: WebKit packs every struct that holds a vec3 and does not unpack a
+				// load made through a let pointer, so Safari refused this kernel with
+				// "no viable conversion from __typeN_Packed". Field reads and writes
+				// through the alias compile, and stay as they are.
+				let queuedRay = ${ params.rayQueue }.elements[ index ];
 				let indexUV = vec2u( queuedRay.pixelIndex >> 16, queuedRay.pixelIndex & 0xFFFF );
 				${ rngInit }( indexUV, queuedRay.seed, queuedRay.currentBounce + queuedRay.alphaDepth );
 

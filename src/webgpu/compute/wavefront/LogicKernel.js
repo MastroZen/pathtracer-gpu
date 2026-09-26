@@ -85,8 +85,14 @@ export class LogicKernel extends ComputeKernel {
 
 				}
 
+				// A whole element is read from the BUFFER, never through the pointer alias
+				// above: WebKit packs every struct that holds a vec3 and does not unpack a
+				// load made through a let pointer, so Safari refused this kernel with
+				// "no viable conversion from __typeN_Packed". Field reads and writes
+				// through the alias compile, and stay as they are.
+
 				// skip slots that have never spawned a ray
-				let input = rayDataStorage[ index ];
+				let input = ${ params.rayDataStorage }[ index ];
 				if ( input.rayIntersectionIndex < 0 ) {
 
 					return;
@@ -113,7 +119,7 @@ export class LogicKernel extends ComputeKernel {
 				// is negative when no shadow ray was enqueued last frame
 				if ( input.shadowRayIntersectionIndex >= 0 && input.lightPdf > 0.0 ) {
 
-					let shadowHit = shadowRayIntersectionsStorage[ u32( input.shadowRayIntersectionIndex ) ];
+					let shadowHit = ${ params.shadowRayIntersectionsStorage }[ u32( input.shadowRayIntersectionIndex ) ];
 					let occluded = shadowHit.objectIndex >= 0;
 					if ( ! occluded ) {
 
@@ -156,7 +162,7 @@ export class LogicKernel extends ComputeKernel {
 					// apply the scatter across the traced segment
 					throughputColor *= scatterRec.color / scatterRec.pdf;
 
-					let hitResult = rayIntersectionsStorage[ u32( input.rayIntersectionIndex ) ];
+					let hitResult = ${ params.rayIntersectionsStorage }[ u32( input.rayIntersectionIndex ) ];
 					let didHit = hitResult.objectIndex >= 0;
 					let surfaceDist = select( ${ LIGHT_FAR_DISTANCE }, hitResult.dist, didHit );
 

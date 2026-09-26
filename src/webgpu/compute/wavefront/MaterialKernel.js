@@ -55,6 +55,8 @@ export class MaterialKernel extends ComputeKernel {
 			globalId: globalId,
 		};
 
+		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
+		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
 		const getCameraRayFn = proxyFn( 'bvhData.value.fns.getCameraRay', params );
 		const sampleTrianglePointFn = proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params );
 		const getSurfaceRecordFn = proxyFn( 'bvhData.value.fns.getSurfaceRecord', params );
@@ -82,8 +84,14 @@ export class MaterialKernel extends ComputeKernel {
 				let shadowRayQueue = &${ params.shadowRayQueue };
 				let pixelQueue = &${ params.pixelQueue };
 
-				let materials = &${ proxy( 'bvhData.value.storage.materials', params ) };
-				let transforms = &${ proxy( 'bvhData.value.storage.transforms', params ) };
+				let materials = &${ materialsBuffer };
+				let transforms = &${ transformsBuffer };
+
+				// A whole element is read from the BUFFER, never through the pointer alias
+				// above: WebKit packs every struct that holds a vec3 and does not unpack a
+				// load made through a let pointer, so Safari refused this kernel with
+				// "no viable conversion from __typeN_Packed". Field reads and writes
+				// through the alias compile, and stay as they are.
 
 				// bound by "rayCount" rather than the pool length. The dispatch rounds up to the
 				// workgroup size and those extra slots hold a zeroed pixel index
@@ -94,7 +102,7 @@ export class MaterialKernel extends ComputeKernel {
 
 				}
 
-				let input = rayDataStorage[ index ];
+				let input = ${ params.rayDataStorage }[ index ];
 				if ( input.objectIndex < 0 ) {
 
 					// the slot's path has terminated: recycle the pixel through the overflow queue and
@@ -234,7 +242,7 @@ export class MaterialKernel extends ComputeKernel {
 					var walkTransmittance = vec3f( 1.0 );
 					if ( input.insideMaterial >= 0 ) {
 
-						let medium = materials[ u32( input.insideMaterial ) ];
+						let medium = ${ materialsBuffer }[ u32( input.insideMaterial ) ];
 
 						// a radius near zero is a surface, not a medium: the path crosses straight
 						// and the exit below handles it
@@ -337,8 +345,8 @@ export class MaterialKernel extends ComputeKernel {
 
 					}
 
-					let objectInfo = transforms[ u32( input.objectIndex ) ];
-					var materialInfo = materials[ objectInfo.materialIndex ];
+					let objectInfo = ${ transformsBuffer }[ u32( input.objectIndex ) ];
+					var materialInfo = ${ materialsBuffer }[ objectInfo.materialIndex ];
 
 					// The surface point is sampled HERE and no longer below: the mix can read
 					// a MASK, and a mask wants the uv of the hit.
@@ -404,7 +412,7 @@ export class MaterialKernel extends ComputeKernel {
 						let mixFac = ${ sampleMixFactorFn }( materialInfo, vertexData );
 						if ( mixFac <= 0.0 ) { break; }
 						if ( ${ rand1 }( ${ RNG_INDEX_MIX_SHADER } + mixStep ) >= mixFac ) { break; }
-						materialInfo = materials[ u32( materialInfo.mixIndex ) ];
+						materialInfo = ${ materialsBuffer }[ u32( materialInfo.mixIndex ) ];
 
 					}
 

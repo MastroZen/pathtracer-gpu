@@ -67,6 +67,8 @@ export class PathTracerMegaKernel extends ComputeKernel {
 
 		// analytic scene lights pulled off the lightsInfo provider ( LightsInfoNode )
 		const lightsCountNode = proxy( 'lightsInfo.value.countNode', params );
+		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
+		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
 		const randomLightSampleFn = proxyFn( 'lightsInfo.value.randomLightSample', params );
 		const intersectLightAtIndexFn = proxyFn( 'lightsInfo.value.intersectLightAtIndex', params );
 
@@ -95,8 +97,14 @@ export class PathTracerMegaKernel extends ComputeKernel {
 
 			) -> void {
 
-				let transforms = &${ proxy( 'bvhData.value.storage.transforms', params ) };
-				let materials = &${ proxy( 'bvhData.value.storage.materials', params ) };
+				let transforms = &${ transformsBuffer };
+				let materials = &${ materialsBuffer };
+
+				// A whole element is read from the BUFFER, never through the pointer alias
+				// above: WebKit packs every struct that holds a vec3 and does not unpack a
+				// load made through a let pointer, so Safari refused this kernel with
+				// "no viable conversion from __typeN_Packed". Field reads and writes
+				// through the alias compile, and stay as they are.
 
 				// make sure we don't bleed over the edge of our tile
 				if ( globalId.x >= tileSize.x || globalId.y >= tileSize.y ) {
@@ -190,8 +198,8 @@ export class PathTracerMegaKernel extends ComputeKernel {
 
 					if ( didHit ) {
 
-						let objectInfo = transforms[ hitResult.objectIndex ];
-						var materialInfo = materials[ objectInfo.materialIndex ];
+						let objectInfo = ${ transformsBuffer }[ hitResult.objectIndex ];
+						var materialInfo = ${ materialsBuffer }[ objectInfo.materialIndex ];
 
 						// a matte surface hit by the camera ray renders as a fully transparent
 						if ( materialInfo.matte != 0 && bounce == 0u ) {
