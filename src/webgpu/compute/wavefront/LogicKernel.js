@@ -155,6 +155,10 @@ export class LogicKernel extends ComputeKernel {
 				// MaterialKernel, which stages a zeroed pdf and skips the bounce trace when they fire
 				var isTerminated = all( throughputColor == vec3f( 0.0 ) ) || input.currentBounce >= maxBounces || ${ isTerminatingScatterFunc }( scatterRec );
 
+				// the lights the traced segment passed through, added once at the end: the escape of a
+				// camera segment ASSIGNS the pixel from the background, and would erase them
+				var lightHits = vec3f( 0.0 );
+
 				if ( ! isTerminated ) {
 
 					// apply the scatter across the traced segment
@@ -164,29 +168,29 @@ export class LogicKernel extends ComputeKernel {
 					let didHit = hitResult.objectIndex >= 0;
 					let surfaceDist = select( ${ LIGHT_FAR_DISTANCE }, hitResult.dist, didHit );
 
-					// forward hits: a bsdf-sampled segment that lands on an area light, on the sphere of a
-					// sized point or spot, or - when it escapes - on the disc of a sun with an angle, which
-					// sits at LIGHT_FAR_DISTANCE and so is never nearer than a surface. MIS-weighted only
-					// when NEE is also sampling the lights. The camera segment is skipped.
-					if ( input.currentBounce > 0u ) {
+					// forward hits: a segment that lands on an area light, on the sphere of a sized point
+					// or spot, or - when it escapes - on the disc of a sun with an angle, which sits at
+					// LIGHT_FAR_DISTANCE and so is never nearer than a surface.
+					//
+					// The CAMERA segment sees them too, as in Cycles: a camera ray skips a light only when
+					// its object leaves camera visibility off (lights_intersect), and objects are born with
+					// it on. There it takes full weight, since no NEE came before it. Past it the hit is
+					// MIS-weighted, only when NEE is also sampling the lights. A light never stops the ray -
+					// Cycles counts it as a transparent bounce - so it adds to what lies behind it
+					for ( var li = 0u; li < lightsCount; li ++ ) {
 
-						for ( var li = 0u; li < lightsCount; li ++ ) {
+						var lightRec: ${ lightRecordStruct };
+						if ( ${ intersectLightAtIndexFn }( input.origin, input.direction, li, &lightRec ) && ( ! didHit || lightRec.dist < surfaceDist ) ) {
 
-							var lightRec: ${ lightRecordStruct };
-							if ( ${ intersectLightAtIndexFn }( input.origin, input.direction, li, &lightRec ) && ( ! didHit || lightRec.dist < surfaceDist ) ) {
+							var misWeight = 1.0;
+							if ( misEnabled != 0u && input.currentBounce > 0u ) {
 
-								var misWeight = 1.0;
-								if ( misEnabled != 0u ) {
-
-									let lightPdf = lightRec.pdf / lightsDenom;
-									misWeight = ${ misHeuristicFn }( input.scatterPdf, lightPdf );
-
-								}
-
-								let lightHit = ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight, input.currentBounce, clampDirect, clampIndirect );
-								resultColor += vec4f( lightHit, 0.0 );
+								let lightPdf = lightRec.pdf / lightsDenom;
+								misWeight = ${ misHeuristicFn }( input.scatterPdf, lightPdf );
 
 							}
+
+							lightHits += ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight, input.currentBounce, clampDirect, clampIndirect );
 
 						}
 
@@ -334,6 +338,10 @@ export class LogicKernel extends ComputeKernel {
 					}
 
 				}
+
+				// the lights leave the alpha as it is, as in Cycles: they are emission, and the pixel is as
+				// transparent as the background behind them
+				resultColor += vec4f( lightHits, 0.0 );
 
 				// the color rows are stored top down to match a rasterized render target
 				let colorIndex = vec2u( indexUV.x, textureDimensions( ${ params.outputTarget } ).y - 1u - indexUV.y );
