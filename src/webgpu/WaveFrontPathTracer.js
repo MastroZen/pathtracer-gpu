@@ -2,6 +2,8 @@ import { Matrix4, StorageBufferAttribute, Vector2 } from 'three/webgpu';
 import { PopulatePixelIndicesKernel } from './compute/wavefront/PopulatePixelIndicesKernel.js';
 import { LogicKernel } from './compute/wavefront/LogicKernel.js';
 import { MaterialKernel } from './compute/wavefront/MaterialKernel.js';
+import { SvmKernel, svmResultsTexture, svmResultsCapacity } from './compute/wavefront/SvmKernel.js';
+import { SVM_REGISTER_BUCKETS, svmRegisterBucket } from './nodes/svm.wgsl.js';
 import { TraceRayKernel } from './compute/wavefront/TraceRayKernel.js';
 import { TraceShadowRayKernel } from './compute/wavefront/TraceShadowRayKernel.js';
 import { QueueLengthToDispatchKernel } from './compute/wavefront/QueueLengthToDispatchKernel.js';
@@ -77,6 +79,10 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.populatePixelIndicesKernel = new PopulatePixelIndicesKernel().setWorkgroupSize( 8, 8, 1 );
 		this.logicKernel = new LogicKernel().setWorkgroupSize( 64, 1, 1 );
 		this.materialKernel = new MaterialKernel().setWorkgroupSize( 64, 1, 1 );
+		// rebuilt with the register file each scene needs; nothing compiles until a dispatch
+		this.svmKernel = new SvmKernel( SVM_REGISTER_BUCKETS[ 0 ] ).setWorkgroupSize( 64, 1, 1 );
+		// allocated the first time a scene has a program, and grown with the pool
+		this.svmResults = null;
 		this.traceRayKernel = new TraceRayKernel().setWorkgroupSize( 64, 1, 1 );
 		this.traceShadowRayKernel = new TraceShadowRayKernel().setWorkgroupSize( 64, 1, 1 );
 		this.rayDispatchConverter = new QueueLengthToDispatchKernel().setWorkgroupSize( 1, 1, 1 );
@@ -115,6 +121,9 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.materialKernel.bvhData = bvhData;
 		this.materialKernel.needsUpdate = true;
 
+		this.svmKernel.bvhData = bvhData;
+		this.svmKernel.needsUpdate = true;
+
 		this.traceRayKernel.bvhData = bvhData;
 		this.traceRayKernel.needsUpdate = true;
 
@@ -142,6 +151,9 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 		this.materialKernel.context.random = random;
 		this.materialKernel.needsUpdate = true;
+
+		this.svmKernel.context.random = random;
+		this.svmKernel.needsUpdate = true;
 
 		this.traceRayKernel.context.random = random;
 		this.traceRayKernel.needsUpdate = true;
@@ -251,6 +263,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		// TODO: dispose of all buffers
 		this.envInfo.dispose();
 		this.lightsInfo.dispose();
+		if ( this.svmResults ) this.svmResults.dispose();
 
 	}
 
@@ -270,6 +283,35 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		// sparire tutta la scena». Non spariva niente.
 		this.traceRayKernel.needsUpdate = true;
 		this.traceShadowRayKernel.needsUpdate = true;
+
+	}
+
+	_updateSvmKernel( registers, rayCount ) {
+
+		if ( this.svmKernel.registers !== registers ) {
+
+			// the random strategy BEFORE the build: the chain must draw from the same
+			// generator as MaterialKernel, or its choice comes from another sequence
+			const kernel = new SvmKernel( registers );
+			kernel.context.random = this.materialKernel.context.random;
+			this.svmKernel = kernel.setWorkgroupSize( 64, 1, 1 );
+			this.svmKernel.bvhData = this.materialKernel.bvhData;
+			if ( this.svmResults ) this.svmKernel.svmResults = this.svmResults;
+
+		}
+
+		// a texture and not a buffer, so a new object needs no rebuilt kernel: the
+		// output targets are swapped the same way every frame
+		if ( ! this.svmResults || svmResultsCapacity( this.svmResults ) < rayCount ) {
+
+			if ( this.svmResults ) this.svmResults.dispose();
+			this.svmResults = svmResultsTexture( rayCount );
+			this.svmKernel.svmResults = this.svmResults;
+			this.materialKernel.svmResults = this.svmResults;
+
+		}
+
+		return this.svmKernel;
 
 	}
 
@@ -377,6 +419,18 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 				zeroDispatchKernel.target = shadowRayQueue;
 				renderer.compute( zeroDispatchKernel.kernel, [ 1 ] );
+
+				// Step 2b: resolve the node tree of the staged hits - the leaf of a Mix Shader
+				// chain and its program. A scene with neither does not dispatch it at all
+				const bvhData = materialKernel.bvhData;
+				if ( ( bvhData?.svmResolved ?? 0 ) > 0 ) {
+
+					const svmKernel = this._updateSvmKernel( svmRegisterBucket( Math.max( 1, bvhData.svmRegisters ) ), rayCount );
+					svmKernel.rayDataStorage = rayDataStorage;
+					svmKernel.rayCount = rayCount;
+					renderer.compute( svmKernel.kernel, svmKernel.getDispatchSize( rayCount, 1, 1 ) );
+
+				}
 
 				// Step 3: evaluate materials — spawn camera rays for freed slots, sample the bsdf, and
 				// enqueue this frame's bounce + shadow rays

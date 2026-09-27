@@ -3,16 +3,17 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR } from '../../nodes/random.wgsl.js';
+import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
-import { applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
+import { mixLeafFunc, applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 import { misHeuristicFn } from '../../nodes/sampling.wgsl.js';
 import { hairSetupFn, hairSigmaFn, hairMelaninFn, hairEvalFn, hairScatterFn } from '../../nodes/hairBsdf.wgsl.js';
 import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '../../nodes/huangBsdf.wgsl.js';
 import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
+import { svmRecordTexelFn, svmResultsTexture } from './SvmKernel.js';
 
 // Pure material evaluation and ray generation: terminated slots pull a recycled pixel and emit a
 // fresh camera ray; live slots evaluate the surface staged by LogicKernel, sample the bsdf, and
@@ -54,6 +55,10 @@ export class MaterialKernel extends ComputeKernel {
 			// dovra' entrare da un'altra parte.
 			ggxGlassTable: storage( new StorageBufferAttribute( GGX_GLASS_E, 1 ), 'float' ).toReadOnly(),
 
+			// the sockets SvmKernel computed for this slot's hit: a storage TEXTURE,
+			// because there is no ninth storage buffer to put them in
+			svmResults: textureStore( svmResultsTexture( 1 ) ).toReadOnly(),
+
 			globalId: globalId,
 		};
 
@@ -62,7 +67,7 @@ export class MaterialKernel extends ComputeKernel {
 		const getCameraRayFn = proxyFn( 'bvhData.value.fns.getCameraRay', params );
 		const sampleTrianglePointFn = proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params );
 		const getSurfaceRecordFn = proxyFn( 'bvhData.value.fns.getSurfaceRecord', params );
-		const sampleMixFactorFn = proxyFn( 'bvhData.value.fns.sampleMixFactor', params );
+		const mixLeafFn = mixLeafFunc( materialsBuffer, proxyFn( 'bvhData.value.fns.sampleMixFactor', params ) );
 		const bsdfSampleFn = proxyFn( 'material.value.bsdfSample', params );
 		const bsdfEvalPdfFn = proxyFn( 'material.value.bsdfEvalPdf', params );
 
@@ -392,33 +397,25 @@ export class MaterialKernel extends ComputeKernel {
 
 					}
 
-					// ── MIX SHADER ──
+					// ── MIX SHADER: the leaf this hit shades (mixLeaf, material.wgsl.js) ──
 					//
-					// One branch is taken at random, in proportion to its weight, instead of
-					// evaluating both and blending: it is what Cycles does
-					// (surface_shader_bsdf_bssrdf_pick). The estimator stays unbiased because
-					// the branch is chosen with exactly its weight, a hit still costs a single
-					// BSDF, and the choice made here also governs the NEE shadow ray below —
-					// they share this record, which is the property a per-lobe blend would lose.
+					// A chain that holds a program was walked by SvmKernel, with the same draws
+					// this kernel would make, and its choice is READ: that kernel ran the
+					// program of the leaf it picked. Every other chain is walked here. One
+					// walker per hit, one function. The leaf also governs the NEE shadow ray
+					// below - they share this record.
 					//
-					// A mix of N shaders arrives FLATTENED into a chain: at each link the
-					// record is kept with probability 1 - mixWeight, or the chain moves on to
-					// the next leaf. The weights are conditional, so the product telescopes
-					// back to the probability each leaf had in the tree.
-					//
-					// Every link draws a DIFFERENT dimension: these are dimensions of one
-					// sequence, so reusing an index would hand the chain the same number twice
-					// and pile the probability onto the first leaves. The bound is the number
-					// of reserved dimensions, and it also keeps wavefront lanes from diverging
-					// on depth.
-					for ( var mixStep = 0u; mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
+					// The leaf's record is loaded even when the leaf is the root: skipping that
+					// load measured 2.5% SLOWER, paired, on a room where every hit is a chain
+					// with a program.
+					let svmResolved = materialInfo.svmResolve != 0u;
+					if ( svmResolved ) {
 
-						// the factor is per hit: a wired Fac is a mask, and then it is the
-						// texture that decides the branch, pixel by pixel
-						let mixFac = ${ sampleMixFactorFn }( materialInfo, vertexData );
-						if ( mixFac <= 0.0 ) { break; }
-						if ( ${ rand1 }( ${ RNG_INDEX_MIX_SHADER } + mixStep ) >= mixFac ) { break; }
-						materialInfo = ${ materialsBuffer }[ u32( materialInfo.mixIndex ) ];
+						materialInfo = ${ materialsBuffer }[ textureLoad( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ) ).x ];
+
+					} else {
+
+						_ = ${ mixLeafFn }( objectInfo.materialIndex, &materialInfo, vertexData );
 
 					}
 
@@ -474,6 +471,22 @@ export class MaterialKernel extends ComputeKernel {
 					let blurRoughness = sqrt( clamp( 1.0 - filterGlossy * input.minPdf, 0.0, 1.0 ) ) * 0.5;
 
 					var surface = ${ getSurfaceRecordFn }( materialInfo, vertexData, hitSide, hitNormal, view, blurRoughness );
+
+					// ── THE NODE MACHINE: the sockets the leaf's program drives, run by SvmKernel ──
+					//
+					// They replace what getSurfaceRecord made of the flat values. The albedo is
+					// linear as it stands, like the preview's. A fibre runs none: its colour
+					// comes from the hair fields, and SvmKernel skips its program.
+					if ( svmResolved && ! isCurve && materialInfo.svmCount > 0u ) {
+
+						let svm = textureLoad( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 0u ) );
+						let svmRoughMetal = unpack2x16float( svm.w );
+						let svmOutputs = materialInfo.svmOutputs;
+						if ( ( svmOutputs & 0xffu ) != 255u ) { surface.color = bitcast<vec3f>( svm.xyz ); }
+						if ( ( ( svmOutputs >> 8u ) & 0xffu ) != 255u ) { surface.roughness = clamp( svmRoughMetal.x, max( MIN_ROUGHNESS, blurRoughness ), 1.0 ); }
+						if ( ( ( svmOutputs >> 16u ) & 0xffu ) != 255u ) { surface.metalness = svmRoughMetal.y; }
+
+					}
 
 					// Stochastically pass through partially transparent surfaces by re-enqueueing
 					// the ray at the hit point, advancing the alpha depth but not the bounce count.

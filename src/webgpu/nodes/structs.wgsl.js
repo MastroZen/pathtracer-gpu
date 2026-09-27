@@ -258,8 +258,23 @@ export const materialStruct = new StructTypeNode( {
 	// e il RIEMPIMENTO che porta il record al passo della struct: i `vec3` la
 	// allineano a quattro float, quindi il totale va tenuto multiplo di quattro.
 	// Il controllo a runtime nel writer conta le parole scritte e le confronta.
-	_hairAlignment1: 'float',
-	// total size = 304
+	//
+	// THE NODE MACHINE (nodes/svm.wgsl.js): where this material's program starts in
+	// the word texture, how many instructions it has, where its constants start, and
+	// the register of each socket it drives - albedo | roughness << 8 | metalness << 16,
+	// 255 for a socket it does not drive. A count of zero is a material without one.
+	// They took the last padding word, and one is added back to stay on the stride.
+	svmCode: 'uint',
+	svmCount: 'uint',
+	svmConsts: 'uint',
+	svmOutputs: 'uint',
+	// 1 when SvmKernel resolves this material's tree - it holds a program, on itself or
+	// on a leaf of the Mix Shader chain it heads - and MaterialKernel reads the leaf it
+	// chose instead of walking the chain. The writer decides it once, and the tracer
+	// counts it to know whether to dispatch.
+	// It took the padding word, so the record keeps its size.
+	svmResolve: 'uint',
+	// total size = 308
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

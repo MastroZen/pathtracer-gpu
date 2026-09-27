@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, StorageBufferAttribute, StructTypeNode, Vector4, SkinnedMesh, RepeatWrapping, ClampToEdgeWrapping, MirroredRepeatWrapping, NearestFilter } from 'three/webgpu';
+import { BufferAttribute, BufferGeometry, StorageBufferAttribute, StructTypeNode, Vector4, SkinnedMesh, RepeatWrapping, ClampToEdgeWrapping, MirroredRepeatWrapping, NearestFilter, DataTexture, RedIntegerFormat, UnsignedIntType } from 'three/webgpu';
 import { BVHComputeData, intersectRayTriangle, bvhNodeBoundsStruct, bvhNodeStruct, rayStruct, rayIntersectionResultStruct as intersectionResultStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { storage, float, texture, uniformArray, uint } from 'three/tsl';
 import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
@@ -8,6 +8,30 @@ import { sampleTexelFunc } from './utils.wgsl.js';
 import { getSurfaceRecordFunc, mixFactorFunc } from './material.wgsl.js';
 import { AtlasTexture } from '../AtlasTexture.js';
 import { materialSideValue } from '../emitters.js';
+import { packSvmPrograms, svmRunFn, SVM_REGISTER_BUCKETS } from './svm.wgsl.js';
+import { RNG_INDEX_MIX_SHADER_COUNT } from './random.wgsl.js';
+
+// ── THE WORDS OF THE NODE MACHINE live in a TEXTURE ──
+//
+// The material kernel already binds eight storage buffers, the minimum a device
+// guarantees, so a ninth would break it where no more are granted. An r32uint
+// texture read with textureLoad is not a storage buffer. Its width is fixed because
+// the reader divides by it.
+const SVM_DATA_WIDTH = 1024;
+
+function svmDataTexture( words ) {
+
+	const height = Math.max( 1, Math.ceil( words.length / SVM_DATA_WIDTH ) );
+	const data = new Uint32Array( SVM_DATA_WIDTH * height );
+	data.set( words );
+	const tex = new DataTexture( data, SVM_DATA_WIDTH, height, RedIntegerFormat, UnsignedIntType );
+	tex.minFilter = NearestFilter;
+	tex.magFilter = NearestFilter;
+	tex.generateMipmaps = false;
+	tex.needsUpdate = true;
+	return tex;
+
+}
 
 const _colorVec = new Vector4();
 const transformStruct = new StructTypeNode( {
@@ -47,6 +71,16 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.materials = [];
 		this.bvhMap = new Map();
 		this.textureAtlas = new AtlasTexture();
+		// ONE node for the program words, made here and never again: a new node per
+		// scene would be a new binding name, and a new name is a new shader - the
+		// recompilation the stable names below exist to avoid. A bigger program set
+		// swaps the node's value, not the node.
+		this.svmTexture = svmDataTexture( new Uint32Array( 4 ) );
+		this.svmDataNode = texture( this.svmTexture ).setName( 'bvh_svmData' );
+		// the register file the widest program needs, and how many materials SvmKernel
+		// resolves: at zero the tracer does not dispatch it
+		this.svmRegisters = 0;
+		this.svmResolved = 0;
 
 	}
 
@@ -179,6 +213,31 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		// build the single sampleTexel bound to this instance's textureInfo node
 		const sampleTexel = sampleTexelFunc( textureInfo, texture( textures ) );
+
+		// THE NODE MACHINE reads its words from the data texture and its images from the
+		// atlas. A clipped image (extension 2) is transparent outside [0, 1]: the atlas
+		// clamps, and clip has no wrap mode of its own
+		const svmWord = wgslTagFn/* wgsl */`
+			fn svmWord( i: u32 ) -> u32 {
+
+				return textureLoad( ${ this.svmDataNode }, vec2i( i32( i % ${ SVM_DATA_WIDTH }u ), i32( i / ${ SVM_DATA_WIDTH }u ) ), 0 ).r;
+
+			}
+		`;
+		const svmSample = wgslTagFn/* wgsl */`
+			fn svmSample( texRef: u32, uv: vec2f, extension: u32, interpolation: u32 ) -> vec4f {
+
+				if ( extension == 2u && ( any( uv < vec2f( 0.0 ) ) || any( uv > vec2f( 1.0 ) ) ) ) { return vec4f( 0.0 ); }
+				return ${ sampleTexel }( uv, bitcast<i32>( texRef ), 0.0 );
+
+			}
+		`;
+		// one interpreter per register file: SvmKernel includes the one its scene needs
+		for ( const registers of SVM_REGISTER_BUCKETS ) {
+
+			fns[ `svmRun${ registers }` ] = svmRunFn( svmSample, svmWord, registers );
+
+		}
 
 		// getSurfaceRecord shares the same sampleTexel, so the surface shading and
 		// the transparency raycast resolve to one textureInfo binding per pipeline
@@ -508,7 +567,26 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.updateMaterialsMap();
 
 		const { materials, storage, structs, bvh } = this;
-		const { materialData, textures } = this.writeMaterialsBuffer( materials );
+		const { materialData, textures, svmWords, svmRegisters, svmResolved } = this.writeMaterialsBuffer( materials );
+		this.svmRegisters = svmRegisters;
+		this.svmResolved = svmResolved;
+
+		// the program words: in place when they fit, a new texture - on the SAME node -
+		// when they do not
+		const capacity = this.svmTexture.image.data.length;
+		if ( svmWords.length > capacity ) {
+
+			this.svmTexture.dispose();
+			this.svmTexture = svmDataTexture( svmWords );
+			this.svmDataNode.value = this.svmTexture;
+
+		} else {
+
+			this.svmTexture.image.data.fill( 0 );
+			this.svmTexture.image.data.set( svmWords );
+			this.svmTexture.needsUpdate = true;
+
+		}
 
 		const materialsStorage = storage.materials.proxyNode;
 		const transformsStorage = storage.transforms.proxyNode;
@@ -556,26 +634,33 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		}
 
+		// the packed reference of one texture, registering it in the atlas list: shared
+		// by the maps and by the images of the node machine
+		function textureWord( texture ) {
+
+			const hash = getTextureHash( texture );
+
+			if ( ! textureLookUp.has( hash ) ) {
+
+				textureLookUp.set( hash, textureLookUp.size );
+				textures.push( texture );
+
+			}
+
+			const idx = textureLookUp.get( hash );							// 23 bits
+			const channel = texture.channel & 7;							// 3 bits
+			const wrapS = encodeTextureWrap( texture.wrapS );				// 2 bits
+			const wrapT = encodeTextureWrap( texture.wrapT );				// 2 bits
+			const nearest = texture.magFilter === NearestFilter ? 1 : 0;	// 1 bit
+			return ( nearest << 30 ) | ( wrapT << 28 ) | ( wrapS << 26 ) | ( channel << 23 ) | ( idx & 0x7fffff );
+
+		}
+
 		function getTexture( material, key ) {
 
 			if ( key in material && material[ key ] ) {
 
-				const texture = material[ key ];
-				const hash = getTextureHash( texture );
-
-				if ( ! textureLookUp.has( hash ) ) {
-
-					textureLookUp.set( hash, textureLookUp.size );
-					textures.push( texture );
-
-				}
-
-				const idx = textureLookUp.get( hash );							// 23 bits
-				const channel = texture.channel & 7;							// 3 bits
-				const wrapS = encodeTextureWrap( texture.wrapS );				// 2 bits
-				const wrapT = encodeTextureWrap( texture.wrapT );				// 2 bits
-				const nearest = texture.magFilter === NearestFilter ? 1 : 0;	// 1 bit
-				return ( nearest << 30 ) | ( wrapT << 28 ) | ( wrapS << 26 ) | ( channel << 23 ) | ( idx & 0x7fffff );
+				return textureWord( material[ key ] );
 
 			} else {
 
@@ -628,6 +713,18 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		const textureLookUp = new Map();
 		const textures = [];
 
+		// THE NODE MACHINE: every material's program in one array of words, its image
+		// slots resolved to atlas references by the same registry the maps use. A
+		// program whose image is missing does not run: its sockets keep the maps
+		const svm = packSvmPrograms( materials.map( m => {
+
+			const program = m.svmProgram;
+			const images = m.svmImages ?? [];
+			if ( ! program || ! images.every( t => t && t.isTexture ) ) return null;
+			return { program, textureRef: slot => textureWord( images[ slot ] ) };
+
+		} ) );
+
 		// NOTE: make the minimum material buffer length 2 in order to avoid TSL converting it to a scalar
 		// TODO: remove this when fixed in three
 		const materialBufferLength = Math.max( materials.length, 2 );
@@ -645,6 +742,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// 296, e una scena senza peli passata da 77 a 31 di luminanza media. Da qui
 		// in poi si conta.
 		const recordLength = this.structs.material.getLength();
+		let svmResolved = 0;
 
 		// TODO: make features work
 		// features.reset();
@@ -928,9 +1026,11 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// out of range, so a missing reference zeroes the weight instead: the record
 			// then reads as "no mix", which is the one safe answer.
 			const mixIndex = m.mixMaterial ? materials.indexOf( m.mixMaterial ) : - 1;
-			floatArray[ index ++ ] = mixIndex < 0 ? 0.0 : getField( m, 'mixWeight', 0.0 );
+			const mixWeight = mixIndex < 0 ? 0.0 : getField( m, 'mixWeight', 0.0 );
+			const mixMap = getTexture( m, 'mixMap' );
+			floatArray[ index ++ ] = mixWeight;
 			intArray[ index ++ ] = Math.max( 0, mixIndex );
-			intArray[ index ++ ] = getTexture( m, 'mixMap' );
+			intArray[ index ++ ] = mixMap;
 
 			// Subsurface - offset 279
 			floatArray[ index ++ ] = getField( m, 'subsurfaceWeight', 0.0 );
@@ -979,8 +1079,34 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			// the area density of this material in the emitter table, zero when it is not a light
 			floatArray[ index ++ ] = this.emitterAreaPdf.get( m ) ?? 0.0;
-			// il riempimento che porta il record al passo della struct: vedi structs.wgsl.js
-			floatArray[ index ++ ] = 0.0;
+
+			// the node machine, see structs.wgsl.js: no program is a count of zero
+			const svmPlace = svm.placements[ i ];
+			const svmOutputs = m.svmOutputs ?? {};
+			const svmReg = r => ( Number.isInteger( r ) && r >= 0 && r < 255 ? r : 255 );
+			intArray[ index ++ ] = svmPlace ? svmPlace.codeWord : 0;
+			intArray[ index ++ ] = svmPlace ? svmPlace.count : 0;
+			intArray[ index ++ ] = svmPlace ? svmPlace.constWord : 0;
+			intArray[ index ++ ] = svmReg( svmOutputs.albedo ) | ( svmReg( svmOutputs.roughness ) << 8 )
+				| ( svmReg( svmOutputs.metalness ) << 16 ) | ( 255 << 24 );
+
+			// SvmKernel resolves the tree of a material that holds a program, on itself or
+			// on a leaf of the chain it heads: the leaf's program runs there, and only
+			// there can the leaf be picked. As far as the walk can reach: the root and one
+			// link per reserved dimension
+			let resolves = false;
+			for ( let link = m, step = 0; link && step <= RNG_INDEX_MIX_SHADER_COUNT; link = link.mixMaterial, step ++ ) {
+
+				if ( svm.placements[ materials.indexOf( link ) ] ) {
+
+					resolves = true;
+					break;
+
+				}
+
+			}
+			intArray[ index ++ ] = resolves ? 1 : 0;
+			if ( resolves ) svmResolved ++;
 
 			if ( index - recordStart !== recordLength ) {
 
@@ -994,7 +1120,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		}
 
-		return { materialData: intArray, textures };
+		return { materialData: intArray, textures, svmWords: svm.words, svmRegisters: svm.registers, svmResolved };
 
 	}
 

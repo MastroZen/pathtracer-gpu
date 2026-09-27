@@ -1,4 +1,5 @@
 import { wgslFn, mat3 } from 'three/tsl';
+import { rand1, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT } from './random.wgsl.js';
 import {
 	inverseMat3x3Func,
 	getBasisFromNormalFunc,
@@ -143,22 +144,73 @@ export const FILTER_GLOSSY_DISABLED = 3.402823466e38;
 //
 // The dependencies are declared, the way getSurfaceRecordFunc does below: without
 // them the generated WGSL carries neither helper and the kernel does not compile.
+//
+// It takes the two fields and not the whole record, because mixLeaf below walks the
+// chain by index.
 export const mixFactorFunc = ( sampleTexel, getUvFromChannel ) => wgslFn( /* wgsl */ `
 
-	fn mixFactor( material: Material, vertexData: bvh_GeometryStruct ) -> f32 {
+	fn mixFactor( mixWeight: f32, mixMap: i32, vertexData: bvh_GeometryStruct ) -> f32 {
 
-		if ( material.mixMap == -1 ) {
+		if ( mixMap == -1 ) {
 
-			return material.mixWeight;
+			return mixWeight;
 
 		}
 
-		let uv = getUvFromChannel( vertexData, material.mixMap );
-		return sampleTexel( uv, material.mixMap, 0 ).r;
+		let uv = getUvFromChannel( vertexData, mixMap );
+		return sampleTexel( uv, mixMap, 0 ).r;
 
 	}
 
 `, [ sampleTexel, getUvFromChannel ] );
+
+// ── MIX SHADER: the leaf a hit shades ──
+//
+// One branch is taken at random, in proportion to its weight, instead of evaluating
+// both and blending: it is what Cycles does (surface_shader_bsdf_bssrdf_pick). The
+// estimator stays unbiased because the branch is chosen with exactly its weight, a hit
+// still costs a single BSDF, and the choice also governs the NEE shadow ray - they
+// share the leaf, which is the property a per-lobe blend would lose.
+//
+// A mix of N shaders arrives FLATTENED into a chain: at each link the record is kept
+// with probability 1 - mixWeight, or the chain moves on to the next leaf. The weights
+// are conditional, so the product telescopes back to the probability each leaf had in
+// the tree.
+//
+// Every link draws a DIFFERENT dimension: these are dimensions of one sequence, so
+// reusing an index would hand the chain the same number twice and pile the probability
+// onto the first leaves. The bound is the number of reserved dimensions, and it also
+// keeps wavefront lanes from diverging on depth.
+//
+// ONE function and two callers, never both for the same hit: SvmKernel walks the chains
+// that hold a program, because it has to run the program of the leaf it picks, and
+// MaterialKernel reads that leaf; every other chain MaterialKernel walks itself.
+//
+// It moves the record IN PLACE and returns the index, and the shape is measured: a walk
+// that returned the index and reloaded the leaf after the loop kept two 308-byte records
+// alive at once in MaterialKernel - 42.8 iterations a second against 48.6 on a room where
+// every hit is a chain, paired runs on the same machine.
+export const mixLeafFunc = ( materials, sampleMixFactor ) => wgslTagFn/* wgsl */`
+
+	fn mixLeaf( root: u32, material: ptr<function, Material>, vertexData: bvh_GeometryStruct ) -> u32 {
+
+		var leaf = root;
+		for ( var mixStep = 0u; mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
+
+			// the factor is per hit: a wired Fac is a mask, and then it is the texture
+			// that decides the branch, pixel by pixel
+			let mixFac = ${ sampleMixFactor }( ( *material ).mixWeight, ( *material ).mixMap, vertexData );
+			if ( mixFac <= 0.0 ) { break; }
+			if ( ${ rand1 }( ${ RNG_INDEX_MIX_SHADER } + mixStep ) >= mixFac ) { break; }
+			leaf = u32( ( *material ).mixIndex );
+			*material = ${ materials }[ leaf ];
+
+		}
+		return leaf;
+
+	}
+
+`;
 
 // Subsurface: how many steps the walk inside the volume may take before the path is
 // dropped. It is the QUALITY knob - a dense medium needs many short steps to come out
