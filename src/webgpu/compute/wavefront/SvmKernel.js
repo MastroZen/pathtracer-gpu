@@ -98,6 +98,8 @@ export class SvmKernel extends ComputeKernel {
 		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
 		const sampleTrianglePointFn = proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params );
 		const getUvFromChannelFn = proxyFn( 'bvhData.value.fns.getUvFromChannel', params );
+		const getGeneratedFn = proxyFn( 'bvhData.value.fns.getGenerated', params );
+		const attributesBuffer = proxy( 'bvhData.value.storage.attributes', params );
 		const sampleMixFactorFn = proxyFn( 'bvhData.value.fns.sampleMixFactor', params );
 		const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
 		const mixLeafFn = mixLeafFunc( materialsBuffer, sampleMixFactorFn );
@@ -163,6 +165,49 @@ export class SvmKernel extends ComputeKernel {
 				// both - measured per pipeline, 15.3 s to compile against 9.3 with one.
 				// ("pass" would be the name of the counter, and it is a WGSL reserved word.)
 				let uv = ${ getUvFromChannelFn }( vertexData, 0 );
+
+				// ── THE SURFACE the Texture Coordinate node reads, in OBJECT space ──
+				//
+				// vertexData is local: MaterialKernel takes it to the world with the object's
+				// matrices. Generated and Object travel with their derivatives along the uv of
+				// this triangle - the columns of a mat3x3f are the value, d/du and d/dv - so a
+				// relief that reads a point beside the hit moves them as far as the uv moved.
+				// The normal is the shading normal on the hit side, as sd->N in Cycles: the
+				// face's where the material is flat, and flipped when the ray meets the back.
+				// The names carry a prefix: "normal" is the relief further down
+				let surfTri = select( rayDataStorage[ index ].indices, vec3u( 0u ), isCurve );
+				let surfA0 = ${ attributesBuffer }[ surfTri.x ];
+				let surfA1 = ${ attributesBuffer }[ surfTri.y ];
+				let surfA2 = ${ attributesBuffer }[ surfTri.z ];
+				let surfE1 = surfA1.position.xyz - surfA0.position.xyz;
+				let surfE2 = surfA2.position.xyz - surfA0.position.xyz;
+				let surfT0 = ${ getUvFromChannelFn }( surfA0, 0 );
+				let surfT1 = ${ getUvFromChannelFn }( surfA1, 0 ) - surfT0;
+				let surfT2 = ${ getUvFromChannelFn }( surfA2, 0 ) - surfT0;
+				let surfDet = surfT1.x * surfT2.y - surfT2.x * surfT1.y;
+				let surfInv = select( 0.0, 1.0 / surfDet, abs( surfDet ) > 1e-20 );
+				let surfG0 = ${ getGeneratedFn }( surfA0 );
+				let surfG1 = ${ getGeneratedFn }( surfA1 ) - surfG0;
+				let surfG2 = ${ getGeneratedFn }( surfA2 ) - surfG0;
+				let surfGenerated = mat3x3f(
+					${ getGeneratedFn }( vertexData ),
+					( surfG1 * surfT2.y - surfG2 * surfT1.y ) * surfInv,
+					( surfG2 * surfT1.x - surfG1 * surfT2.x ) * surfInv,
+				);
+				let surfObject = mat3x3f(
+					vertexData.position.xyz,
+					( surfE1 * surfT2.y - surfE2 * surfT1.y ) * surfInv,
+					( surfE2 * surfT1.x - surfE1 * surfT2.x ) * surfInv,
+				);
+				let surfFace = cross( surfE1, surfE2 );
+				var surfNormal = select( normalize( vertexData.normal.xyz ), normalize( surfFace ), materialInfo.flatShading != 0 );
+				let surfDirection = ( ${ transformsBuffer }[ u32( objectIndex ) ].inverseMatrixWorld * vec4f( rayDataStorage[ index ].direction, 0.0 ) ).xyz;
+				if ( dot( surfFace, surfDirection ) > 0.0 ) {
+
+					surfNormal = - surfNormal;
+
+				}
+
 				var regs: array<vec4f, ${ registers }>;
 				let liveWeights = materialInfo.svmMixCount > 0u;
 				let rounds = select( 1u, 2u, liveWeights );
@@ -206,7 +251,7 @@ export class SvmKernel extends ComputeKernel {
 
 					if ( count > 0u ) {
 
-						_ = ${ svmRunFn }( code, count, consts, uv, &regs );
+						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, &regs );
 
 					}
 

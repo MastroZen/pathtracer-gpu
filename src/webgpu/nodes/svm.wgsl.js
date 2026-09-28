@@ -37,8 +37,11 @@ export const SVM_OPCODES = Object.freeze( {
 	UV: 1, CONST: 2, BAKED: 3, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
-	SEPARATE_COLOR: 19, COMBINE_COLOR: 20,
+	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21,
 } );
+
+/** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
+export const SVM_COORD_ORDER = Object.freeze( [ 'generated', 'object', 'normal' ] );
 
 /** The index tables, in the order the compiler numbers them. A test compares them too. */
 export const SVM_BLEND_ORDER = Object.freeze( [
@@ -535,6 +538,7 @@ export const SVM_REG_SOURCE = svmRegSource( SVM_REGISTERS );
 const svmRunSource = ( registers ) => /* wgsl */ `
 fn svmRun(
 	codeWord: u32, count: u32, constWord: u32, uv: vec2f,
+	generated: mat3x3f, objectPos: mat3x3f, normal: vec3f,
 	regs: ptr<function, array<vec4f, ${ registers }>>,
 ) -> u32 {
 
@@ -564,6 +568,21 @@ fn svmRun(
 
 			case ${ O.UV }u: { r0 = vec4f( uv + vec2f( svmConst( c ), svmConst( c + 1u ) ), 0.0, 1.0 ); }
 			case ${ O.CONST }u: { r0 = vec4f( svmConst( c ), svmConst( c + 1u ), svmConst( c + 2u ), svmConst( c + 3u ) ); }
+			case ${ O.COORD }u: {
+
+				// the columns are the value and its derivatives along u and v, so a relief
+				// that reads a point beside the hit moves Generated and Object as far as the
+				// uv moved; the normal does not move, as in Cycles, whose bump moves P only
+				let shift = vec3f( 1.0, svmConst( c ), svmConst( c + 1u ) );
+				switch flags {
+
+					case 0u: { r0 = vec4f( generated * shift, 1.0 ); }
+					case 1u: { r0 = vec4f( objectPos * shift, 1.0 ); }
+					default: { r0 = vec4f( normal, 1.0 ); }
+
+				}
+
+			}
 			case ${ O.BAKED }u: { r0 = svmSample( svmWord( c ), uv, 0u, 0u ); }
 			case ${ O.IMAGE }u: {
 

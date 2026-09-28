@@ -87,7 +87,11 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 	updateUvAttributesFromScene() {
 
 		const { attributes } = this;
-		const keys = new Set( [ 'color' ] );
+		// "generated" is the Generated texture coordinate of the Texture Coordinate node,
+		// the undeformed mesh normalised on its texture space: a geometry carries it only
+		// when one of its materials reads it, so it joins the struct like a second uv
+		delete attributes.generated;
+		const keys = new Set( [ 'color', 'generated' ] );
 		for ( let i = 0; i < 8; i ++ ) {
 
 			const key = i === 0 ? 'uv' : 'uv' + i;
@@ -198,6 +202,23 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			`;
 
 		}
+
+	}
+
+	updateGeneratedSampleFn() {
+
+		// the Generated coordinate of a vertex, or zero where no geometry of the scene
+		// carries the attribute: the same zero a geometry without it reads from the
+		// default of its struct member
+		const { structs, fns } = this;
+		const hasGenerated = Boolean( structs.attributes.membersLayout.find( ( { name } ) => name === 'generated' ) );
+		fns.getGenerated = wgslTagFn/* wgsl */`
+			fn getGenerated( vertexData: ${ structs.attributes } ) -> vec3f {
+
+				return ${ hasGenerated ? 'vertexData.generated.xyz' : 'vec3f( 0.0 )' };
+
+			}
+		`;
 
 	}
 
@@ -471,6 +492,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// build the channel -> uv lookup now that the geometry struct (and its uv members) exist
 		this.updateUvSampleFunction();
 		this.updateColorSampleFn();
+		this.updateGeneratedSampleFn();
 
 		// build material storage
 		this.updateMaterials();
