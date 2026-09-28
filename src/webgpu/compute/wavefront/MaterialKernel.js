@@ -409,13 +409,15 @@ export class MaterialKernel extends ComputeKernel {
 					// load measured 2.5% SLOWER, paired, on a room where every hit is a chain
 					// with a program.
 					let svmResolved = materialInfo.svmResolve != 0u;
+					var svmLeafTexel = vec4u( 0u );
 					if ( svmResolved ) {
 
-						materialInfo = ${ materialsBuffer }[ textureLoad( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ) ).x ];
+						svmLeafTexel = textureLoad( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ) );
+						materialInfo = ${ materialsBuffer }[ svmLeafTexel.x ];
 
 					} else {
 
-						_ = ${ mixLeafFn }( objectInfo.materialIndex, &materialInfo, vertexData );
+						_ = ${ mixLeafFn }( objectInfo.materialIndex, &materialInfo, vertexData, false, vec4f( 0.0 ), vec4f( 0.0 ) );
 
 					}
 
@@ -470,7 +472,16 @@ export class MaterialKernel extends ComputeKernel {
 					// from the Cycles "filter glossy" approach in integrator/surface_shader.h
 					let blurRoughness = sqrt( clamp( 1.0 - filterGlossy * input.minPdf, 0.0, 1.0 ) ) * 0.5;
 
-					var surface = ${ getSurfaceRecordFn }( materialInfo, vertexData, hitSide, hitNormal, view, blurRoughness );
+					// the relief of the leaf's program, when it drives the normal: the fourth
+					// register of its outputs, and two halves in the second texel of the record
+					var liveNormal = vec3f( 0.0 );
+					if ( svmResolved && ! isCurve && materialInfo.svmCount > 0u && ( materialInfo.svmOutputs >> 24u ) != 255u ) {
+
+						liveNormal = vec3f( unpack2x16float( svmLeafTexel.y ), 1.0 );
+
+					}
+
+					var surface = ${ getSurfaceRecordFn }( materialInfo, vertexData, hitSide, hitNormal, view, blurRoughness, liveNormal );
 
 					// ── THE NODE MACHINE: the sockets the leaf's program drives, run by SvmKernel ──
 					//

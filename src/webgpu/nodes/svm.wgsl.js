@@ -562,7 +562,7 @@ fn svmRun(
 
 		switch op {
 
-			case ${ O.UV }u: { r0 = vec4f( uv, 0.0, 1.0 ); }
+			case ${ O.UV }u: { r0 = vec4f( uv + vec2f( svmConst( c ), svmConst( c + 1u ) ), 0.0, 1.0 ); }
 			case ${ O.CONST }u: { r0 = vec4f( svmConst( c ), svmConst( c + 1u ), svmConst( c + 2u ), svmConst( c + 3u ) ); }
 			case ${ O.BAKED }u: { r0 = svmSample( svmWord( c ), uv, 0u, 0u ); }
 			case ${ O.IMAGE }u: {
@@ -731,18 +731,14 @@ export function packSvmPrograms( entries ) {
 
 	const words = [];
 	const placements = [];
+	const mixPlacements = [];
 	const bits = new Uint32Array( 1 );
 	const float = new Float32Array( bits.buffer );
-	for ( const entry of entries ) {
 
-		const program = entry?.program;
-		if ( ! program ) {
+	// one program into the words, or null when there is none
+	const place = ( program, textureRef ) => {
 
-			placements.push( null );
-			continue;
-
-		}
-
+		if ( ! program ) return null;
 		const codeWord = words.length;
 		const count = program.code.length / 4;
 		const refs = new Set();
@@ -759,7 +755,7 @@ export function packSvmPrograms( entries ) {
 
 			if ( refs.has( i ) ) {
 
-				words.push( entry.textureRef( value ) >>> 0 );
+				words.push( textureRef( value ) >>> 0 );
 
 			} else {
 
@@ -769,13 +765,22 @@ export function packSvmPrograms( entries ) {
 			}
 
 		} );
-		placements.push( { codeWord, count, constWord } );
+		return { codeWord, count, constWord };
+
+	};
+
+	// a material may bring the program of its sockets and the program of the weights
+	// of the chain it heads, each with its own texture slots
+	for ( const entry of entries ) {
+
+		placements.push( place( entry?.program, entry?.textureRef ) );
+		mixPlacements.push( place( entry?.mixProgram, entry?.mixTextureRef ) );
 
 	}
 
 	// the widest program, which sizes the register file of the kernel that runs them
-	const registers = Math.max( 0, ...entries.map( entry => entry?.program?.registers ?? 0 ) );
-	return { words: Uint32Array.from( words ), placements, registers };
+	const registers = Math.max( 0, ...entries.flatMap( entry => [ entry?.program?.registers ?? 0, entry?.mixProgram?.registers ?? 0 ] ) );
+	return { words: Uint32Array.from( words ), placements, mixPlacements, registers };
 
 }
 

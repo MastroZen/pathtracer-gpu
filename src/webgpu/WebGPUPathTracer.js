@@ -647,7 +647,9 @@ export class WebGPUPathTracer {
 		 * On a floor of constant radiance, from 1 to 8 samples a 4x4 box keeps 2.2 to 2.9% of
 		 * the variance, where white noise keeps 6.25%; by 16 samples it is nearly white (5.1%).
 		 * Cycles reaches blue noise another way, giving each pixel its own section of one
-		 * long sequence; the Sobol generator here stops at 65536 points.
+		 * long sequence; the Sobol generator here stops at 65536 points. The dither repeats
+		 * over a 64 x 64 tile, so each tile seeds the sequence with its own scramble: seeded
+		 * alike, the noise repeated every 64 pixels (see bluedither.wgsl.js).
 		 * @type {Object}
 		 * @private
 		 */

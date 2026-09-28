@@ -718,10 +718,16 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// program whose image is missing does not run: its sockets keep the maps
 		const svm = packSvmPrograms( materials.map( m => {
 
-			const program = m.svmProgram;
+			// a program whose image is missing does not run, and the same for the weights
+			const usable = ( program, images ) => program && images.every( t => t && t.isTexture );
 			const images = m.svmImages ?? [];
-			if ( ! program || ! images.every( t => t && t.isTexture ) ) return null;
-			return { program, textureRef: slot => textureWord( images[ slot ] ) };
+			const mixImages = m.svmMixImages ?? [];
+			return {
+				program: usable( m.svmProgram, images ) ? m.svmProgram : null,
+				textureRef: slot => textureWord( images[ slot ] ),
+				mixProgram: usable( m.svmMixProgram, mixImages ) ? m.svmMixProgram : null,
+				mixTextureRef: slot => textureWord( mixImages[ slot ] ),
+			};
 
 		} ) );
 
@@ -1088,7 +1094,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			intArray[ index ++ ] = svmPlace ? svmPlace.count : 0;
 			intArray[ index ++ ] = svmPlace ? svmPlace.constWord : 0;
 			intArray[ index ++ ] = svmReg( svmOutputs.albedo ) | ( svmReg( svmOutputs.roughness ) << 8 )
-				| ( svmReg( svmOutputs.metalness ) << 16 ) | ( 255 << 24 );
+				| ( svmReg( svmOutputs.metalness ) << 16 ) | ( svmReg( svmOutputs.normal ) << 24 );
 
 			// SvmKernel resolves the tree of a material that holds a program, on itself or
 			// on a leaf of the chain it heads: the leaf's program runs there, and only
@@ -1105,8 +1111,25 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 				}
 
 			}
+			// and a chain whose weights are a program is walked there too
+			if ( svm.mixPlacements[ i ] ) resolves = true;
 			intArray[ index ++ ] = resolves ? 1 : 0;
 			if ( resolves ) svmResolved ++;
+
+			// the program of the weights of the chain, and the register of each link
+			const mixPlace = svm.mixPlacements[ i ];
+			const mixOutputs = mixPlace ? m.svmMixProgram.outputs : [];
+			const mixReg = k => svmReg( mixOutputs[ k ] );
+			intArray[ index ++ ] = mixPlace ? mixPlace.codeWord : 0;
+			intArray[ index ++ ] = mixPlace ? mixPlace.count : 0;
+			intArray[ index ++ ] = mixPlace ? mixPlace.constWord : 0;
+			intArray[ index ++ ] = mixReg( 0 ) | ( mixReg( 1 ) << 8 ) | ( mixReg( 2 ) << 16 ) | ( mixReg( 3 ) << 24 );
+			intArray[ index ++ ] = mixReg( 4 ) | ( mixReg( 5 ) << 8 ) | ( mixReg( 6 ) << 16 ) | ( 255 << 24 );
+
+			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
+			intArray[ index ++ ] = 0;
+			intArray[ index ++ ] = 0;
+			intArray[ index ++ ] = 0;
 
 			if ( index - recordStart !== recordLength ) {
 

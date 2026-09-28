@@ -261,8 +261,9 @@ export const materialStruct = new StructTypeNode( {
 	//
 	// THE NODE MACHINE (nodes/svm.wgsl.js): where this material's program starts in
 	// the word texture, how many instructions it has, where its constants start, and
-	// the register of each socket it drives - albedo | roughness << 8 | metalness << 16,
-	// 255 for a socket it does not drive. A count of zero is a material without one.
+	// the register of each socket it drives - albedo | roughness << 8 | metalness << 16 |
+	// the relief of the normal << 24, 255 for a socket it does not drive. A count of zero
+	// is a material without one.
 	// They took the last padding word, and one is added back to stay on the stride.
 	svmCode: 'uint',
 	svmCount: 'uint',
@@ -274,7 +275,20 @@ export const materialStruct = new StructTypeNode( {
 	// counts it to know whether to dispatch.
 	// It took the padding word, so the record keeps its size.
 	svmResolve: 'uint',
-	// total size = 308
+	// THE WEIGHTS OF THE CHAIN this record heads, as a program (the app's
+	// compileMixWeights): a wired Mix Shader Fac run per hit instead of read from its
+	// value. Where it starts, how long, its constants, and the register of the weight
+	// of each of the seven links, four per word, 255 for none.
+	svmMixCode: 'uint',
+	svmMixCount: 'uint',
+	svmMixConsts: 'uint',
+	svmMixOutputs0: 'uint',
+	svmMixOutputs1: 'uint',
+	// and the padding that keeps the record on the stride of four
+	_svmMixAlignment0: 'uint',
+	_svmMixAlignment1: 'uint',
+	_svmMixAlignment2: 'uint',
+	// total size = 316
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

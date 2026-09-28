@@ -186,20 +186,36 @@ export const mixFactorFunc = ( sampleTexel, getUvFromChannel ) => wgslFn( /* wgs
 // that hold a program, because it has to run the program of the leaf it picks, and
 // MaterialKernel reads that leaf; every other chain MaterialKernel walks itself.
 //
+// A chain whose Fac is wired has its link weights computed by a program (the app's
+// compileMixWeights), and SvmKernel passes them in "linkWeights": the weight of link k
+// is component k of the pair. "live" false reads each link's own record instead.
+//
 // It moves the record IN PLACE and returns the index, and the shape is measured: a walk
 // that returned the index and reloaded the leaf after the loop kept two 308-byte records
 // alive at once in MaterialKernel - 42.8 iterations a second against 48.6 on a room where
 // every hit is a chain, paired runs on the same machine.
 export const mixLeafFunc = ( materials, sampleMixFactor ) => wgslTagFn/* wgsl */`
 
-	fn mixLeaf( root: u32, material: ptr<function, Material>, vertexData: bvh_GeometryStruct ) -> u32 {
+	fn mixLeaf(
+		root: u32, material: ptr<function, Material>, vertexData: bvh_GeometryStruct,
+		live: bool, linkWeights0: vec4f, linkWeights1: vec4f,
+	) -> u32 {
 
 		var leaf = root;
 		for ( var mixStep = 0u; mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
 
 			// the factor is per hit: a wired Fac is a mask, and then it is the texture
 			// that decides the branch, pixel by pixel
-			let mixFac = ${ sampleMixFactor }( ( *material ).mixWeight, ( *material ).mixMap, vertexData );
+			var mixFac: f32;
+			if ( live ) {
+
+				mixFac = select( linkWeights1[ min( mixStep - 4u, 3u ) ], linkWeights0[ min( mixStep, 3u ) ], mixStep < 4u );
+
+			} else {
+
+				mixFac = ${ sampleMixFactor }( ( *material ).mixWeight, ( *material ).mixMap, vertexData );
+
+			}
 			if ( mixFac <= 0.0 ) { break; }
 			if ( ${ rand1 }( ${ RNG_INDEX_MIX_SHADER } + mixStep ) >= mixFac ) { break; }
 			leaf = u32( ( *material ).mixIndex );
@@ -303,6 +319,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 		faceNormal: vec3f,
 		view: vec3f,
 		blurRoughness: f32,
+		liveNormal: vec3f,
 	) -> SurfaceRecord {
 
 		// "faceNormal" is provided on the hit side so flip it back to the geometric side
@@ -314,7 +331,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 		}
 
 		var baseNormal = normal;
-		if ( material.normalMap != -1 ) {
+		// the tangent-space normal comes from the normal map, or LIVE from the node machine
+		// ("liveNormal", the relief of a wired normal pin computed per hit; a z of zero is
+		// none): the same frame either way, so the two paths of a relief agree
+		if ( material.normalMap != -1 || liveNormal.z != 0.0 ) {
 
 			// some provided tangents can be malformed (0, 0, 0) causing the normal to be degenerate
 			// resulting in NaNs and slow path tracing.
@@ -326,10 +346,15 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 				let bitangent = normalize( cross( baseNormal, tangent ) * vertexData.tangent.w );
 				let vTBN = mat3x3f( tangent, bitangent, baseNormal );
 
-				let uvPrime = material.normalMapTransform * vec3( getUvFromChannel( vertexData, material.normalMap ), 1.0 );
-				var texNormal = sampleTexel( uvPrime.xy, material.normalMap, 0 ).xyz;
-				texNormal = texNormal * 2.0 - 1.0;
-				texNormal = texNormal * vec3f( material.normalScale, 1.0 );
+				var texNormal = liveNormal;
+				if ( material.normalMap != -1 ) {
+
+					let uvPrime = material.normalMapTransform * vec3( getUvFromChannel( vertexData, material.normalMap ), 1.0 );
+					texNormal = sampleTexel( uvPrime.xy, material.normalMap, 0 ).xyz;
+					texNormal = texNormal * 2.0 - 1.0;
+					texNormal = texNormal * vec3f( material.normalScale, 1.0 );
+
+				}
 				normal = normalize( vTBN * texNormal );
 
 			}

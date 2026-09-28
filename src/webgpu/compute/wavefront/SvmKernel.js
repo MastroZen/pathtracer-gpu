@@ -32,14 +32,20 @@ import { mixLeafFunc } from '../../nodes/material.wgsl.js';
 // have one.
 //
 // Its register file is the one the scene needs (SVM_REGISTER_BUCKETS in svm.wgsl.js),
-// so the tracer rebuilds it when a scene crosses a size: 2.7 s, this kernel alone.
+// so the tracer rebuilds it when a scene crosses a size: this kernel alone.
+//
+// The weights of a wired Fac are always compiled in, and it is measured: a variant
+// without them compiled in 7.4 s against 7.8 with, inside the noise of the measure.
+// What costs is the loop of rounds around the interpreter - 4.7 s before it, once
+// per page against the 35 s of the material kernel.
 //
 // The megakernel does not run it, and has no Mix Shader either.
 
 // slots per row of the record texture: the readers divide by it, so it is fixed
 export const SVM_SLOTS_PER_ROW = 1024;
 // texel 0: the albedo as three float32 words, bit for bit, and roughness and metalness
-// as two halves of the fourth. Texel 1: the index of the material to shade.
+// as two halves of the fourth. Texel 1: the index of the material to shade, and the
+// x and y of the relief's tangent normal as two halves.
 // Integer and not float because a float texel may flush a denormal - a metalness of
 // zero in the high half of a bitcast word is one
 export const SVM_RECORD_TEXELS = 2;
@@ -96,6 +102,15 @@ export class SvmKernel extends ComputeKernel {
 		const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
 		const mixLeafFn = mixLeafFunc( materialsBuffer, sampleMixFactorFn );
 
+		// a register read as a link weight: 255 is no link, and weighs zero
+		const svmWeightFn = wgslFn( /* wgsl */ `
+			fn svmWeight( regs: ptr<function, array<vec4f, ${ registers }>>, r: u32 ) -> f32 {
+
+				return select( 0.0, ( *regs )[ min( r, ${ registers - 1 }u ) ].x, r != 255u );
+
+			}
+		` );
+
 		const fn = wgslTagFn/* wgsl */`
 
 			fn compute( rayCount: u32, globalId: vec3u ) -> void {
@@ -142,32 +157,75 @@ export class SvmKernel extends ComputeKernel {
 				let indexUV = vec2u( rayDataStorage[ index ].pixelIndex >> 16, rayDataStorage[ index ].pixelIndex & 0xFFFF );
 				${ rngInit }( indexUV, rayDataStorage[ index ].seed, rayDataStorage[ index ].currentBounce + rayDataStorage[ index ].alphaDepth + rayDataStorage[ index ].subsurfaceSteps );
 
-				// the leaf of the chain (nodes/material.wgsl.js, mixLeaf): this kernel walks
-				// only the chains that hold a program, and MaterialKernel reads its choice
-				materialIndex = ${ mixLeafFn }( materialIndex, &materialInfo, vertexData );
+				// ONE CALL SITE of the interpreter, in one round or two: the weights of the
+				// chain when its Fac is wired, then the program of the leaf they pick. Two call
+				// sites were two copies of the interpreter in this kernel, and FXC paid for
+				// both - measured per pipeline, 15.3 s to compile against 9.3 with one.
+				// ("pass" would be the name of the counter, and it is a WGSL reserved word.)
+				let uv = ${ getUvFromChannelFn }( vertexData, 0 );
+				var regs: array<vec4f, ${ registers }>;
+				let liveWeights = materialInfo.svmMixCount > 0u;
+				let rounds = select( 1u, 2u, liveWeights );
+				var linkWeights0 = vec4f( 0.0 );
+				var linkWeights1 = vec4f( 0.0 );
+				var code = materialInfo.svmMixCode;
+				var count = materialInfo.svmMixCount;
+				var consts = materialInfo.svmMixConsts;
+				for ( var round = 0u; round < rounds; round ++ ) {
 
-				// the leaf's program, on a surface: a fibre takes its colour from the hair
-				// fields of the record, and has no uv of its own to run one at
+					// the last round runs the leaf: the chain is walked first, with the weights
+					// the round before left in the registers
+					if ( round + 1u == rounds ) {
+
+						if ( liveWeights ) {
+
+							let w0 = materialInfo.svmMixOutputs0;
+							let w1 = materialInfo.svmMixOutputs1;
+							linkWeights0 = vec4f(
+								${ svmWeightFn }( &regs, w0 & 0xffu ), ${ svmWeightFn }( &regs, ( w0 >> 8u ) & 0xffu ),
+								${ svmWeightFn }( &regs, ( w0 >> 16u ) & 0xffu ), ${ svmWeightFn }( &regs, ( w0 >> 24u ) & 0xffu ),
+							);
+							linkWeights1 = vec4f(
+								${ svmWeightFn }( &regs, w1 & 0xffu ), ${ svmWeightFn }( &regs, ( w1 >> 8u ) & 0xffu ),
+								${ svmWeightFn }( &regs, ( w1 >> 16u ) & 0xffu ), 0.0,
+							);
+
+						}
+
+						// the leaf of the chain (nodes/material.wgsl.js, mixLeaf): this kernel walks
+						// only the chains that hold a program, and MaterialKernel reads its choice
+						materialIndex = ${ mixLeafFn }( materialIndex, &materialInfo, vertexData, liveWeights, linkWeights0, linkWeights1 );
+
+						// a fibre takes its colour from the hair fields of the record, and has no
+						// uv of its own to run a program at
+						code = materialInfo.svmCode;
+						count = select( 0u, materialInfo.svmCount, ! isCurve );
+						consts = materialInfo.svmConsts;
+
+					}
+
+					if ( count > 0u ) {
+
+						_ = ${ svmRunFn }( code, count, consts, uv, &regs );
+
+					}
+
+				}
+
+				// a socket the program does not drive reads register zero, and MaterialKernel
+				// does not use it: the mask is the leaf's svmOutputs
 				var albedo = vec3f( 0.0 );
 				var roughness = 0.0;
 				var metalness = 0.0;
-				if ( ! isCurve && materialInfo.svmCount > 0u ) {
+				var normal = vec2f( 0.0 );
+				if ( count > 0u ) {
 
-					var regs: array<vec4f, ${ registers }>;
-					_ = ${ svmRunFn }(
-						materialInfo.svmCode,
-						materialInfo.svmCount,
-						materialInfo.svmConsts,
-						${ getUvFromChannelFn }( vertexData, 0 ),
-						&regs,
-					);
-
-					// a socket the program does not drive reads register zero, and
-					// MaterialKernel does not use it: the mask is the leaf's svmOutputs
 					let outputs = materialInfo.svmOutputs;
 					albedo = regs[ min( outputs & 0xffu, ${ registers - 1 }u ) ].xyz;
 					roughness = regs[ min( ( outputs >> 8u ) & 0xffu, ${ registers - 1 }u ) ].x;
 					metalness = regs[ min( ( outputs >> 16u ) & 0xffu, ${ registers - 1 }u ) ].x;
+					// the relief: the x and y of a tangent normal whose z is one
+					normal = regs[ min( outputs >> 24u, ${ registers - 1 }u ) ].xy;
 
 				}
 
@@ -176,7 +234,7 @@ export class SvmKernel extends ComputeKernel {
 					${ svmRecordTexelFn }( index, 0u ),
 					vec4u( bitcast<vec3u>( albedo ), pack2x16float( vec2f( roughness, metalness ) ) ),
 				);
-				textureStore( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ), vec4u( materialIndex, 0u, 0u, 0u ) );
+				textureStore( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ), vec4u( materialIndex, pack2x16float( normal ), 0u, 0u ) );
 
 			}
 		`;
