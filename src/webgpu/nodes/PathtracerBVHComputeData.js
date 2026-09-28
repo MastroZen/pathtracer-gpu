@@ -5,7 +5,7 @@ import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
 import { materialStruct } from './structs.wgsl.js';
 import { getTextureHash } from '../../core/utils/sceneUpdateUtils.js';
 import { sampleTexelFunc } from './utils.wgsl.js';
-import { getSurfaceRecordFunc, mixFactorFunc } from './material.wgsl.js';
+import { getSurfaceRecordFunc } from './material.wgsl.js';
 import { AtlasTexture } from '../AtlasTexture.js';
 import { materialSideValue } from '../emitters.js';
 import { packSvmPrograms, svmRunFn, SVM_REGISTER_BUCKETS } from './svm.wgsl.js';
@@ -263,7 +263,6 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// getSurfaceRecord shares the same sampleTexel, so the surface shading and
 		// the transparency raycast resolve to one textureInfo binding per pipeline
 		fns.getSurfaceRecord = getSurfaceRecordFunc( sampleTexel, fns.getUvFromChannel, fns.getColor );
-		fns.sampleMixFactor = mixFactorFunc( sampleTexel, fns.getUvFromChannel );
 
 		// raycast first hit, bounded by the ray's "maxDist" - 0 means unbounded
 		const currentMaterialIndex = uint().toVar( 'bvh_materialIndex' );
@@ -1055,10 +1054,10 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// then reads as "no mix", which is the one safe answer.
 			const mixIndex = m.mixMaterial ? materials.indexOf( m.mixMaterial ) : - 1;
 			const mixWeight = mixIndex < 0 ? 0.0 : getField( m, 'mixWeight', 0.0 );
-			const mixMap = getTexture( m, 'mixMap' );
 			floatArray[ index ++ ] = mixWeight;
 			intArray[ index ++ ] = Math.max( 0, mixIndex );
-			intArray[ index ++ ] = mixMap;
+			// mixPad: see structs.wgsl.js
+			intArray[ index ++ ] = 0;
 
 			// Subsurface - offset 279
 			floatArray[ index ++ ] = getField( m, 'subsurfaceWeight', 0.0 );

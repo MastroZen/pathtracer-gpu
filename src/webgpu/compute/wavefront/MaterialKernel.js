@@ -67,7 +67,7 @@ export class MaterialKernel extends ComputeKernel {
 		const getCameraRayFn = proxyFn( 'bvhData.value.fns.getCameraRay', params );
 		const sampleTrianglePointFn = proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params );
 		const getSurfaceRecordFn = proxyFn( 'bvhData.value.fns.getSurfaceRecord', params );
-		const mixLeafFn = mixLeafFunc( materialsBuffer, proxyFn( 'bvhData.value.fns.sampleMixFactor', params ) );
+		const mixLeafFn = mixLeafFunc( materialsBuffer );
 		const bsdfSampleFn = proxyFn( 'material.value.bsdfSample', params );
 		const bsdfEvalPdfFn = proxyFn( 'material.value.bsdfEvalPdf', params );
 
@@ -417,7 +417,7 @@ export class MaterialKernel extends ComputeKernel {
 
 					} else {
 
-						_ = ${ mixLeafFn }( objectInfo.materialIndex, &materialInfo, vertexData, false, vec4f( 0.0 ), vec4f( 0.0 ) );
+						_ = ${ mixLeafFn }( objectInfo.materialIndex, &materialInfo, false, vec4f( 0.0 ), vec4f( 0.0 ) );
 
 					}
 
@@ -472,12 +472,13 @@ export class MaterialKernel extends ComputeKernel {
 					// from the Cycles "filter glossy" approach in integrator/surface_shader.h
 					let blurRoughness = sqrt( clamp( 1.0 - filterGlossy * input.minPdf, 0.0, 1.0 ) ) * 0.5;
 
-					// the relief of the leaf's program, when it drives the normal: the fourth
-					// register of its outputs, and two halves in the second texel of the record
+					// the tangent normal of the leaf's program, when it drives the normal: the fourth
+					// register of its outputs, x and y as two halves and z as a float in the second
+					// texel of the record
 					var liveNormal = vec3f( 0.0 );
 					if ( svmResolved && ! isCurve && materialInfo.svmCount > 0u && ( materialInfo.svmOutputs >> 24u ) != 255u ) {
 
-						liveNormal = vec3f( unpack2x16float( svmLeafTexel.y ), 1.0 );
+						liveNormal = vec3f( unpack2x16float( svmLeafTexel.y ), bitcast<f32>( svmLeafTexel.z ) );
 
 					}
 

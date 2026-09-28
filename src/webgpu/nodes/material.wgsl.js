@@ -134,36 +134,6 @@ const ensureValidViewNormal = wgslTagFn/* wgsl */`
 // clamps to zero for any path pdf when the inverted filter value is this large.
 export const FILTER_GLOSSY_DISABLED = 3.402823466e38;
 
-// Mix Shader: the factor of a mix, read per hit. A wired Fac is a MASK — a texture —
-// so the number changes across the surface and the stochastic pick has to draw
-// against the local value rather than the flat one. It is built here because this is
-// where the atlas sampler and the uv channel lookup are in scope.
-//
-// The red channel carries the mask: a grayscale bake, and reading one channel keeps
-// the record to a single index instead of a swizzle no one would set.
-//
-// The dependencies are declared, the way getSurfaceRecordFunc does below: without
-// them the generated WGSL carries neither helper and the kernel does not compile.
-//
-// It takes the two fields and not the whole record, because mixLeaf below walks the
-// chain by index.
-export const mixFactorFunc = ( sampleTexel, getUvFromChannel ) => wgslFn( /* wgsl */ `
-
-	fn mixFactor( mixWeight: f32, mixMap: i32, vertexData: bvh_GeometryStruct ) -> f32 {
-
-		if ( mixMap == -1 ) {
-
-			return mixWeight;
-
-		}
-
-		let uv = getUvFromChannel( vertexData, mixMap );
-		return sampleTexel( uv, mixMap, 0 ).r;
-
-	}
-
-`, [ sampleTexel, getUvFromChannel ] );
-
 // ── MIX SHADER: the leaf a hit shades ──
 //
 // One branch is taken at random, in proportion to its weight, instead of evaluating
@@ -194,18 +164,18 @@ export const mixFactorFunc = ( sampleTexel, getUvFromChannel ) => wgslFn( /* wgs
 // that returned the index and reloaded the leaf after the loop kept two 308-byte records
 // alive at once in MaterialKernel - 42.8 iterations a second against 48.6 on a room where
 // every hit is a chain, paired runs on the same machine.
-export const mixLeafFunc = ( materials, sampleMixFactor ) => wgslTagFn/* wgsl */`
+export const mixLeafFunc = ( materials ) => wgslTagFn/* wgsl */`
 
 	fn mixLeaf(
-		root: u32, material: ptr<function, Material>, vertexData: bvh_GeometryStruct,
+		root: u32, material: ptr<function, Material>,
 		live: bool, linkWeights0: vec4f, linkWeights1: vec4f,
 	) -> u32 {
 
 		var leaf = root;
 		for ( var mixStep = 0u; mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
 
-			// the factor is per hit: a wired Fac is a mask, and then it is the texture
-			// that decides the branch, pixel by pixel
+			// the factor is per hit when the Fac is wired: the program's link weights; a
+			// number is the link's own weight, written in the record
 			var mixFac: f32;
 			if ( live ) {
 
@@ -213,7 +183,7 @@ export const mixLeafFunc = ( materials, sampleMixFactor ) => wgslTagFn/* wgsl */
 
 			} else {
 
-				mixFac = ${ sampleMixFactor }( ( *material ).mixWeight, ( *material ).mixMap, vertexData );
+				mixFac = ( *material ).mixWeight;
 
 			}
 			if ( mixFac <= 0.0 ) { break; }

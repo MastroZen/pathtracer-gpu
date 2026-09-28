@@ -100,9 +100,8 @@ export class SvmKernel extends ComputeKernel {
 		const getUvFromChannelFn = proxyFn( 'bvhData.value.fns.getUvFromChannel', params );
 		const getGeneratedFn = proxyFn( 'bvhData.value.fns.getGenerated', params );
 		const attributesBuffer = proxy( 'bvhData.value.storage.attributes', params );
-		const sampleMixFactorFn = proxyFn( 'bvhData.value.fns.sampleMixFactor', params );
 		const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
-		const mixLeafFn = mixLeafFunc( materialsBuffer, sampleMixFactorFn );
+		const mixLeafFn = mixLeafFunc( materialsBuffer );
 
 		// a register read as a link weight: 255 is no link, and weighs zero
 		const svmWeightFn = wgslFn( /* wgsl */ `
@@ -239,7 +238,7 @@ export class SvmKernel extends ComputeKernel {
 
 						// the leaf of the chain (nodes/material.wgsl.js, mixLeaf): this kernel walks
 						// only the chains that hold a program, and MaterialKernel reads its choice
-						materialIndex = ${ mixLeafFn }( materialIndex, &materialInfo, vertexData, liveWeights, linkWeights0, linkWeights1 );
+						materialIndex = ${ mixLeafFn }( materialIndex, &materialInfo, liveWeights, linkWeights0, linkWeights1 );
 
 						// a fibre takes its colour from the hair fields of the record, and has no
 						// uv of its own to run a program at
@@ -262,15 +261,16 @@ export class SvmKernel extends ComputeKernel {
 				var albedo = vec3f( 0.0 );
 				var roughness = 0.0;
 				var metalness = 0.0;
-				var normal = vec2f( 0.0 );
+				var normal = vec3f( 0.0 );
 				if ( count > 0u ) {
 
 					let outputs = materialInfo.svmOutputs;
 					albedo = regs[ min( outputs & 0xffu, ${ registers - 1 }u ) ].xyz;
 					roughness = regs[ min( ( outputs >> 8u ) & 0xffu, ${ registers - 1 }u ) ].x;
 					metalness = regs[ min( ( outputs >> 16u ) & 0xffu, ${ registers - 1 }u ) ].x;
-					// the relief: the x and y of a tangent normal whose z is one
-					normal = regs[ min( outputs >> 24u, ${ registers - 1 }u ) ].xy;
+					// the tangent normal: the relief, whose z is one, or a Normal Map, of unit
+					// length. The z travels too: assumed one, a normal map tilted less than it is
+					normal = regs[ min( outputs >> 24u, ${ registers - 1 }u ) ].xyz;
 
 				}
 
@@ -279,7 +279,7 @@ export class SvmKernel extends ComputeKernel {
 					${ svmRecordTexelFn }( index, 0u ),
 					vec4u( bitcast<vec3u>( albedo ), pack2x16float( vec2f( roughness, metalness ) ) ),
 				);
-				textureStore( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ), vec4u( materialIndex, pack2x16float( normal ), 0u, 0u ) );
+				textureStore( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ), vec4u( materialIndex, pack2x16float( normal.xy ), bitcast<u32>( normal.z ), 0u ) );
 
 			}
 		`;

@@ -23,7 +23,7 @@
 //
 // ── THE WORDS AND THE IMAGES COME FROM THE INCLUDER ──
 //
-// The program is read through svmWord( i ), and IMAGE and BAKED read texels
+// The program is read through svmWord( i ), and IMAGE reads texels
 // through svmSample( ref, uv, extension, interpolation ): this file defines
 // neither. The kernel reads the words from a data TEXTURE, not a storage buffer —
 // its material kernel binds exactly eight, the guaranteed minimum, and a ninth
@@ -32,12 +32,13 @@
 // (packSvmPrograms writes it), everything else a float's bits.
 import { wgslFn } from 'three/tsl';
 
-/** The opcodes. They must equal SVM_OP in src/graph/svm.ts, and a test compares them. */
+/** The opcodes. They must equal SVM_OP in src/graph/svm.ts, and a test compares them. Three was BAKED, a baked
+ * map of a node the machine did not run: it left with every node running live, and the number is not reused. */
 export const SVM_OPCODES = Object.freeze( {
-	UV: 1, CONST: 2, BAKED: 3, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
+	UV: 1, CONST: 2, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
-	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21,
+	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -583,7 +584,6 @@ fn svmRun(
 				}
 
 			}
-			case ${ O.BAKED }u: { r0 = svmSample( svmWord( c ), uv, 0u, 0u ); }
 			case ${ O.IMAGE }u: {
 
 				r0 = svmSample( svmWord( c ), a.xy, u32( svmConst( c + 1u ) ), u32( svmConst( c + 2u ) ) );
@@ -711,6 +711,20 @@ fn svmRun(
 				r2 = vec4f( a.zzz, 1.0 );
 
 			}
+			case ${ O.NORMAL_MAP }u: {
+
+				// Cycles' svm_node_normal_map in tangent space: the colour decoded and
+				// normalized, then mixed toward the surface normal (0, 0, 1) by the strength;
+				// the two selects are safe_normalize, a zero vector would give NaN
+				let up = vec3f( 0.0, 0.0, 1.0 );
+				let raw = select( vec3f( 0.5, 0.5, 1.0 ), a.xyz, i0 != 255u ) * 2.0 - 1.0;
+				let len = length( raw );
+				let d = select( up, raw / len, len > 0.0 );
+				let m = up + ( d - up ) * max( svmConst( c ), 0.0 );
+				let lm = length( m );
+				r0 = vec4f( select( up, m / lm, lm > 0.0 ), 1.0 );
+
+			}
 			case ${ O.COMBINE_COLOR }u: {
 
 				r0 = vec4f( select( 0.0, svmLum( a ), i0 != 255u ), select( 0.0, svmLum( b ), i1 != 255u ), select( 0.0, svmLum( f ), i2 != 255u ), 1.0 );
@@ -741,7 +755,7 @@ export const SVM_HELPER_FNS = [
 /**
  * Packs compiled programs into the one array of words the interpreter reads: each
  * program's code, then its constants as float bits, with the constant of every
- * IMAGE and BAKED instruction replaced by the entry's textureRef( slot ) as a RAW
+ * IMAGE instruction replaced by the entry's textureRef( slot ) as a RAW
  * word — the reference carries the atlas index and the wrap and filter bits, and
  * 2^31 does not survive as a float. Slots are numbered per program, so each entry
  * brings its own resolver. A missing entry packs as null.
@@ -765,7 +779,7 @@ export function packSvmPrograms( entries ) {
 
 			words.push( program.code[ k * 4 ] >>> 0, program.code[ k * 4 + 1 ] >>> 0, program.code[ k * 4 + 2 ] >>> 0, program.code[ k * 4 + 3 ] >>> 0 );
 			const op = program.code[ k * 4 ] & 0xff;
-			if ( op === O.IMAGE || op === O.BAKED ) refs.add( program.code[ k * 4 + 3 ] );
+			if ( op === O.IMAGE ) refs.add( program.code[ k * 4 + 3 ] );
 
 		}
 

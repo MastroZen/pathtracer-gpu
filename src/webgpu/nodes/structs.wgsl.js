@@ -165,10 +165,10 @@ export const materialStruct = new StructTypeNode( {
 	// so a struct that does not land on the stride shifts every record after the
 	// first. It shows up as a mix that renders darker than either branch, which
 	// looks like a physics bug and is an offset bug.
-	// A wired Fac is a MASK: the index of its texture lives here. No transform beside
-	// it, unlike the other maps — a baked mask has no offset or repeat, and a mat3 per
-	// material to carry an identity is twelve floats each.
-	mixMap: 'int',
+	// One word of padding, so the mix and subsurface fields stay one vec4. It held the
+	// texture of a wired Fac baked into a mask (mixMap); the app no longer bakes, and a
+	// wired Fac runs as a program in SvmKernel, which passes the link weights in.
+	mixPad: 'int',
 	// Subsurface: how often a hit goes INTO the volume instead of scattering off the
 	// surface. It is a closure among the others, picked the same way the mix is — which
 	// is what Cycles does, and the reason this sits next to the mix fields.
