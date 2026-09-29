@@ -302,9 +302,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 
 		var baseNormal = normal;
 		// the tangent-space normal comes from the normal map, or LIVE from the node machine
-		// ("liveNormal", the relief of a wired normal pin computed per hit; a z of zero is
-		// none): the same frame either way, so the two paths of a relief agree
-		if ( material.normalMap != -1 || liveNormal.z != 0.0 ) {
+		// ("liveNormal", the relief or the Normal Map of a wired normal pin computed per hit;
+		// a zero vector is none): the same frame either way, so the two paths agree. A live
+		// normal is never zero, its z is: a Normal Map may lie flat on the surface
+		if ( material.normalMap != -1 || dot( liveNormal, liveNormal ) > 0.0 ) {
 
 			// some provided tangents can be malformed (0, 0, 0) causing the normal to be degenerate
 			// resulting in NaNs and slow path tracing.

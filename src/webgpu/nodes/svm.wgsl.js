@@ -713,14 +713,14 @@ fn svmRun(
 			}
 			case ${ O.NORMAL_MAP }u: {
 
-				// Cycles' svm_node_normal_map in tangent space: the colour decoded and
-				// normalized, then mixed toward the surface normal (0, 0, 1) by the strength;
-				// the two selects are safe_normalize, a zero vector would give NaN
+				// Cycles 5.2 svm_node_normal_map in tangent space: x and y scaled by the
+				// strength, z taken toward one by the saturated strength, one normalize. The
+				// second constant is the sign of green (DirectX flips it). The select is
+				// safe_normalize: a zero vector would give NaN
 				let up = vec3f( 0.0, 0.0, 1.0 );
 				let raw = select( vec3f( 0.5, 0.5, 1.0 ), a.xyz, i0 != 255u ) * 2.0 - 1.0;
-				let len = length( raw );
-				let d = select( up, raw / len, len > 0.0 );
-				let m = up + ( d - up ) * max( svmConst( c ), 0.0 );
+				let s = svmConst( c );
+				let m = vec3f( raw.x * s, raw.y * svmConst( c + 1u ) * s, 1.0 + ( raw.z - 1.0 ) * saturate( s ) );
 				let lm = length( m );
 				r0 = vec4f( select( up, m / lm, lm > 0.0 ), 1.0 );
 
