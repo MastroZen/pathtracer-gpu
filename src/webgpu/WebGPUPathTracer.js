@@ -349,6 +349,29 @@ export class WebGPUPathTracer {
 
 	}
 
+	/**
+	 * The pixel filter of Cycles as its table (the inverted CDF of the filter), or null for the
+	 * box filter: the ray falls uniformly inside the pixel.
+	 * @type {Float32Array|null}
+	 * @default null
+	 */
+	get pixelFilterTable() {
+
+		return this._pixelFilterTable;
+
+	}
+
+	set pixelFilterTable( v ) {
+
+		if ( this._pixelFilterTable !== v ) {
+
+			this._pixelFilterTable = v;
+			this._pathTracer.setPixelFilter( v );
+
+		}
+
+	}
+
 	set filterGlossyFactor( v ) {
 
 		if ( this._filterGlossyFactor !== v ) {
@@ -506,6 +529,7 @@ export class WebGPUPathTracer {
 		this._pathTracer.setMultipleImportanceSampling( this.multipleImportanceSampling );
 		this._pathTracer.setTransmissiveBackground( this._transmissiveBackground );
 		this._pathTracer.setFilterGlossy( this._filterGlossyFactor );
+		this._pathTracer.setPixelFilter( this._pixelFilterTable );
 		this._pathTracer.setClamping( this._clampDirect, this._clampIndirect );
 		this.setCamera( this.camera );
 
@@ -630,6 +654,7 @@ export class WebGPUPathTracer {
 		this.pause = false;
 
 		this.filterGlossyFactor = 1;
+		this._pixelFilterTable = null;
 		this._clampDirect = 0;
 		this._clampIndirect = 10;
 		this.multipleImportanceSampling = true;

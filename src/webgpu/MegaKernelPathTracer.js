@@ -106,6 +106,13 @@ export class MegaKernelPathTracer extends PathTracerBackend {
 
 	}
 
+	setPixelFilter( /* table */ ) {
+
+		// the megakernel keeps its box jitter: the pixel filter lives in the wavefront
+		// MaterialKernel, the path the app uses
+
+	}
+
 	setClamping( direct, indirect ) {
 
 		this.kernel.clampDirect = direct;

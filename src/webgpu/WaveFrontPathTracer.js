@@ -181,6 +181,27 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
+	setPixelFilter( table ) {
+
+		// the Cycles pixel filter: the inverted CDF of the filter, PIXEL_FILTER_TABLE_SIZE values,
+		// or null for the box filter, which the kernel draws without a table
+		const kernel = this.materialKernel;
+		if ( table ) {
+
+			const vectors = kernel.pixelFilterNode.array;
+			for ( let i = 0; i < vectors.length; i ++ ) {
+
+				vectors[ i ].set( table[ i * 4 ], table[ i * 4 + 1 ], table[ i * 4 + 2 ], table[ i * 4 + 3 ] );
+
+			}
+
+		}
+
+		kernel.pixelFilterOn = table ? 1 : 0;
+		this.reset();
+
+	}
+
 	setClamping( direct, indirect ) {
 
 		this.logicKernel.clampDirect = direct;

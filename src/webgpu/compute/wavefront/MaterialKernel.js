@@ -1,7 +1,7 @@
-import { Vector2 } from 'three';
+import { Vector2, Vector4 } from 'three';
 import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
-import { uniform, storage, textureStore, globalId } from 'three/tsl';
+import { uniform, uniformArray, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
@@ -14,6 +14,7 @@ import { hairSetupFn, hairSigmaFn, hairMelaninFn, hairEvalFn, hairScatterFn } fr
 import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '../../nodes/huangBsdf.wgsl.js';
 import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
 import { svmRecordTexelFn, svmResultsTexture } from './SvmKernel.js';
+import { PIXEL_FILTER_TABLE_SIZE, pixelFilterReadFunc } from '../../nodes/pixelFilter.wgsl.js';
 
 // Pure material evaluation and ray generation: terminated slots pull a recycled pixel and emit a
 // fresh camera ray; live slots evaluate the surface staged by LogicKernel, sample the bsdf, and
@@ -59,6 +60,13 @@ export class MaterialKernel extends ComputeKernel {
 			// because there is no ninth storage buffer to put them in
 			svmResults: textureStore( svmResultsTexture( 1 ) ).toReadOnly(),
 
+			// THE PIXEL FILTER OF CYCLES (scene/film.cpp filter_table): the inverted CDF of the
+			// filter, read per camera ray. A uniform buffer and not a storage one: this kernel
+			// already holds the eight storage buffers WebGPU guarantees. Off, the ray falls
+			// uniformly inside the pixel, which is the box filter of width one
+			pixelFilterOn: uniform( 0, 'uint' ),
+			pixelFilterTable: uniformArray( Array.from( { length: PIXEL_FILTER_TABLE_SIZE / 4 }, () => new Vector4() ), 'vec4' ),
+
 			globalId: globalId,
 		};
 
@@ -70,6 +78,8 @@ export class MaterialKernel extends ComputeKernel {
 		const mixLeafFn = mixLeafFunc( materialsBuffer );
 		const bsdfSampleFn = proxyFn( 'material.value.bsdfSample', params );
 		const bsdfEvalPdfFn = proxyFn( 'material.value.bsdfEvalPdf', params );
+
+		const pixelFilterReadFn = pixelFilterReadFunc( params.pixelFilterTable );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -83,6 +93,7 @@ export class MaterialKernel extends ComputeKernel {
 				maxBounces: u32,
 				maxSubsurfaceSteps: u32,
 				misEnabled: u32,
+				pixelFilterOn: u32,
 
 				globalId: vec3u
 			) -> void {
@@ -145,7 +156,16 @@ export class MaterialKernel extends ComputeKernel {
 					${ rngInit }( indexUV, seed + samples, 0 );
 
 					let uv = vec2f( indexUV ) / vec2f( targetDimensions );
-					let jitteredUv = uv + ${ rand2 }( ${ RNG_INDEX_RAY_JITTER } ) / vec2f( targetDimensions );
+					// the pixel filter: a ray offset read from the table of the filter, and the first
+					// sample at the pixel centre, as init_from_camera does in Cycles
+					var pixelOffset = ${ rand2 }( ${ RNG_INDEX_RAY_JITTER } );
+					if ( pixelFilterOn == 1u ) {
+
+						let filterUv = select( pixelOffset, vec2f( 0.5 ), samples == 0u );
+						pixelOffset = vec2f( ${ pixelFilterReadFn }( filterUv.x ), ${ pixelFilterReadFn }( filterUv.y ) );
+
+					}
+					let jitteredUv = uv + pixelOffset / vec2f( targetDimensions );
 					var ray: ${ rayStruct };
 					if ( ! ${ getCameraRayFn }( jitteredUv, vec2f( targetDimensions ), &ray ) ) {
 
@@ -915,6 +935,9 @@ export class MaterialKernel extends ComputeKernel {
 		super( fn( params ) );
 
 		this.defineUniformAccessors( params );
+		// the table node itself: the accessor above would swap its padded buffer, and the node
+		// uploads from its array of vectors at every dispatch
+		this.pixelFilterNode = params.pixelFilterTable;
 
 	}
 
