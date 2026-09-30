@@ -284,8 +284,13 @@ export const materialStruct = new StructTypeNode( {
 	svmMixConsts: 'uint',
 	svmMixOutputs0: 'uint',
 	svmMixOutputs1: 'uint',
+	// 1 when this record is an EMISSION leaf whose colour is a program: an Emission node,
+	// or the implicit one Blender makes of a non-shader link plugged into a shader input
+	// (Cycles shader_graph.cpp, EEVEE ntree_shader_implicit_closure_cast). The program's
+	// colour, in the albedo register, is light, and the surface scatters nothing.
+	// It took a padding word, so the record keeps its size.
+	svmEmission: 'uint',
 	// and the padding that keeps the record on the stride of four
-	_svmMixAlignment0: 'uint',
 	_svmMixAlignment1: 'uint',
 	_svmMixAlignment2: 'uint',
 	// total size = 316

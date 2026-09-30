@@ -518,6 +518,15 @@ export class MaterialKernel extends ComputeKernel {
 						if ( ( ( svmOutputs >> 8u ) & 0xffu ) != 255u ) { surface.roughness = clamp( svmRoughMetal.x, max( MIN_ROUGHNESS, blurRoughness ), 1.0 ); }
 						if ( ( ( svmOutputs >> 16u ) & 0xffu ) != 255u ) { surface.metalness = svmRoughMetal.y; }
 
+						// an Emission leaf: the colour the program made is the light the surface
+						// gives off, and the record already scatters nothing (black, no specular)
+						if ( materialInfo.svmEmission != 0u ) {
+
+							surface.emission = surface.color;
+							surface.color = vec3f( 0.0 );
+
+						}
+
 					}
 
 					// Stochastically pass through partially transparent surfaces by re-enqueueing

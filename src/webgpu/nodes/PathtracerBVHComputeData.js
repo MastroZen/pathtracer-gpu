@@ -1147,8 +1147,10 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			intArray[ index ++ ] = mixReg( 0 ) | ( mixReg( 1 ) << 8 ) | ( mixReg( 2 ) << 16 ) | ( mixReg( 3 ) << 24 );
 			intArray[ index ++ ] = mixReg( 4 ) | ( mixReg( 5 ) << 8 ) | ( mixReg( 6 ) << 16 ) | ( 255 << 24 );
 
+			// an emission leaf: the program's colour is light (see structs.wgsl.js)
+			intArray[ index ++ ] = m.svmEmission && svmPlace ? 1 : 0;
+
 			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
-			intArray[ index ++ ] = 0;
 			intArray[ index ++ ] = 0;
 			intArray[ index ++ ] = 0;
 
