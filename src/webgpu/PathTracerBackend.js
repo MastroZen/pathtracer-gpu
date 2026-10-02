@@ -22,6 +22,12 @@ export class PathTracerBackend {
 		// short steps to reach the other side, and stopping early loses that light.
 		this.maxSubsurfaceSteps = SUBSURFACE_MAX_STEPS;
 
+		// Blender's Volume Bounces, zero by default as there: one scatter inside a medium,
+		// lit by the direct light. And the medium the camera stands in, set by the tracer
+		// from the camera position (cameraMedium.js), -1 for none
+		this.maxVolumeBounces = 0;
+		this.cameraMedium = - 1;
+
 		// ── LA PELURIA ──
 		//
 		// Un pacchetto solo, gia' impacchettato da chi lo genera (src/hair/curvePack.ts

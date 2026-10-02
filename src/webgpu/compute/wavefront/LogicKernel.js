@@ -9,6 +9,7 @@ import {
 	rngInit, rand2, rand3,
 	RNG_INDEX_BACKGROUND_SAMPLE,
 	RNG_INDEX_DIRECT_LIGHT_SAMPLE,
+	RNG_INDEX_MEDIUM,
 } from '../../nodes/random.wgsl.js';
 import { ENVIRONMENT_LIGHT_TYPE, LIGHT_FAR_DISTANCE, isMISWeightLightFn, neeSlotProbabilityFn } from '../../nodes/lights.wgsl.js';
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
@@ -26,6 +27,9 @@ export class LogicKernel extends ComputeKernel {
 			envInfo: { value: null },
 			backgroundInfo: { value: null },
 			lightsInfo: { value: null },
+			// the material records, for the medium a path travels inside: the sixth storage
+			// buffer of this kernel, after its three and the two of the lights
+			bvhData: { value: null },
 
 			// targets
 			prevOutputTarget: textureStore( new StorageTexture( 1, 1 ) ).toReadOnly(),
@@ -65,6 +69,7 @@ export class LogicKernel extends ComputeKernel {
 		const lightSlotActiveFn = proxyFn( 'lightsInfo.value.lightSlotActive', params );
 		const emitterSlotWeightFn = proxyFn( 'lightsInfo.value.emitterSlotWeight', params );
 		const neeTotalsFn = proxyFn( 'lightsInfo.value.neeTotals', params );
+		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -130,7 +135,8 @@ export class LogicKernel extends ComputeKernel {
 
 						// env + area lights are also bsdf-sampled, so MIS-weight them; punctual take full weight
 						let misWeight = select( 1.0, ${ misHeuristicFn }( input.lightPdf, input.lightBsdfPdf ), ${ isMISWeightLightFn }( input.lightType ) );
-						let directLight = throughputColor * input.lightEmission * input.lightBsdf * misWeight / input.lightPdf;
+						// times what the media it crossed let through, one without any
+						let directLight = throughputColor * input.lightEmission * input.lightBsdf * misWeight / input.lightPdf * shadowHit.barycoord;
 						let contribution = ${ clampPathContributionFunc }( directLight, input.currentBounce, clampDirect, clampIndirect );
 						resultColor += vec4f( contribution, 0.0 );
 
@@ -175,6 +181,76 @@ export class LogicKernel extends ComputeKernel {
 					let didHit = hitResult.objectIndex >= 0;
 					let surfaceDist = select( ${ LIGHT_FAR_DISTANCE }, hitResult.dist, didHit );
 
+					// -- THE MEDIUM THE SEGMENT CROSSES (Cycles shade_volume.h, volume_integrate_homogeneous) --
+					//
+					// A path inside a participating medium does not reach the surface for sure: it
+					// scatters on the way with an exponential law, and where it does that point is
+					// the next vertex - the light is chosen from THERE, which is why this happens
+					// here and not in MaterialKernel, which has no room for the lights. Distance
+					// sampling on a channel picked by albedo times throughput, as Cycles
+					// volume_sample_channel; the weight is sigma_s T over the pdf on a scatter and T
+					// over the probability of getting this far on a transmit. A medium that only
+					// absorbs draws nothing and takes its transmittance. The emission of the whole
+					// segment is added either way, being an integral that does not depend on the
+					// draw. Divergences: the scatter and the direct light share one point instead of
+					// two, and there is no equiangular sampling yet (docs/mezzi.md in the app).
+					let inMedium = input.insideMaterial >= 0
+						&& ( ${ materialsBuffer }[ u32( input.insideMaterial ) ].mediumFlags & 2u ) != 0u;
+					var sigmaT = vec3f( 0.0 );
+					var channelP = vec3f( 0.0 );
+					var mediumSampled = false;
+					var mediumScatter = false;
+					var mediumEnd = surfaceDist;
+					var mediumWeight = vec3f( 1.0 );
+					if ( inMedium ) {
+
+						let m = u32( input.insideMaterial );
+						let sigmaS = vec3f( ${ materialsBuffer }[ m ].mediumScatterR, ${ materialsBuffer }[ m ].mediumScatterG, ${ materialsBuffer }[ m ].mediumScatterB );
+						sigmaT = sigmaS + vec3f( ${ materialsBuffer }[ m ].mediumAbsorptionR, ${ materialsBuffer }[ m ].mediumAbsorptionG, ${ materialsBuffer }[ m ].mediumAbsorptionB );
+						let mediumEmission = vec3f( ${ materialsBuffer }[ m ].mediumEmissionR, ${ materialsBuffer }[ m ].mediumEmissionG, ${ materialsBuffer }[ m ].mediumEmissionB );
+						if ( any( mediumEmission > vec3f( 0.0 ) ) ) {
+
+							// the integral of the emission times the transmittance, and its limit L
+							// where the medium is clear (volume_emission_integrate)
+							let opaque = sigmaT > vec3f( 1e-6 );
+							let integral = select( mediumEmission * surfaceDist, mediumEmission * ( 1.0 - exp( - sigmaT * surfaceDist ) ) / max( sigmaT, vec3f( 1e-6 ) ), opaque );
+							resultColor += vec4f( ${ clampPathContributionFunc }( throughputColor * integral, max( input.currentBounce, 1u ) - 1u, clampDirect, clampIndirect ), 0.0 );
+
+						}
+
+						if ( all( sigmaS <= vec3f( 0.0 ) ) ) {
+
+							mediumWeight = exp( - sigmaT * surfaceDist );
+
+						} else {
+
+							mediumSampled = true;
+							let carried = max( throughputColor * sigmaS / max( sigmaT, vec3f( 1e-9 ) ), vec3f( 0.0 ) );
+							let carriedSum = carried.r + carried.g + carried.b;
+							channelP = select( vec3f( 1.0 / 3.0 ), carried / carriedSum, carriedSum > 1e-9 );
+							let u = ${ rand2 }( ${ RNG_INDEX_MEDIUM } );
+							var channel = 2u;
+							if ( u.x < channelP.r ) { channel = 0u; }
+							else if ( u.x < channelP.r + channelP.g ) { channel = 1u; }
+							let t = - log( max( 1.0 - u.y, 1e-9 ) ) / max( sigmaT[ channel ], 1e-9 );
+							if ( t < surfaceDist ) {
+
+								mediumScatter = true;
+								mediumEnd = t;
+								let transmittance = exp( - sigmaT * t );
+								mediumWeight = sigmaS * transmittance / max( dot( channelP, sigmaT * transmittance ), 1e-9 );
+
+							} else {
+
+								let transmittance = exp( - sigmaT * surfaceDist );
+								mediumWeight = transmittance / max( dot( channelP, transmittance ), 1e-9 );
+
+							}
+
+						}
+
+					}
+
 					// the NEE choice as it was made at the vertex this segment left: what a light found by
 					// the segment is weighed against
 					let originTotals = ${ neeTotalsFn }( input.origin, envWeight );
@@ -191,7 +267,7 @@ export class LogicKernel extends ComputeKernel {
 					for ( var li = 0u; li < lightsCount; li ++ ) {
 
 						var lightRec: ${ lightRecordStruct };
-						if ( ${ intersectLightAtIndexFn }( input.origin, input.direction, li, &lightRec ) && ( ! didHit || lightRec.dist < surfaceDist ) ) {
+						if ( ${ intersectLightAtIndexFn }( input.origin, input.direction, li, &lightRec ) && ( ( ! didHit && ! mediumScatter ) || lightRec.dist < mediumEnd ) ) {
 
 							var misWeight = 1.0;
 							if ( misEnabled != 0u && input.currentBounce > 0u ) {
@@ -201,13 +277,36 @@ export class LogicKernel extends ComputeKernel {
 
 							}
 
-							lightHits += ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight, input.currentBounce, clampDirect, clampIndirect );
+							// seen through the medium: its transmittance, over the probability of the
+							// draw getting this far when there was one
+							var mediumFactor = vec3f( 1.0 );
+							if ( inMedium ) {
+
+								let transmittance = exp( - sigmaT * lightRec.dist );
+								mediumFactor = select( transmittance, transmittance / max( dot( channelP, transmittance ), 1e-9 ), mediumSampled );
+
+							}
+							lightHits += ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight * mediumFactor, input.currentBounce, clampDirect, clampIndirect );
 
 						}
 
 					}
 
-					if ( didHit ) {
+					throughputColor *= mediumWeight;
+					rayDataStorage[ index ].mediumScatter = select( 0u, 1u, mediumScatter );
+					// the vertex the next light is chosen from: the surface, or the scatter point
+					let vertexPosition = select( hitResult.position, input.origin + input.direction * mediumEnd, mediumScatter );
+
+					if ( mediumScatter ) {
+
+						// a live slot, whose object MaterialKernel does not read on a scatter
+						rayDataStorage[ index ].objectIndex = max( hitResult.objectIndex, 0 );
+						rayDataStorage[ index ].isCurve = 0u;
+						rayDataStorage[ index ].dist = mediumEnd;
+
+					}
+
+					if ( didHit && ! mediumScatter ) {
 
 						// stage the hit for MaterialKernel
 						rayDataStorage[ index ].barycoord = hitResult.barycoord;
@@ -221,6 +320,10 @@ export class LogicKernel extends ComputeKernel {
 						rayDataStorage[ index ].objectIndex = hitResult.objectIndex;
 						rayDataStorage[ index ].dist = hitResult.dist;
 
+					}
+
+					if ( didHit || mediumScatter ) {
+
 						// the emitter slot's probability at the vertex this segment left, for MaterialKernel,
 						// which weighs the emission of this surface and has no room for the lights buffer
 						rayDataStorage[ index ].emitterSelectPdf = ${ neeSlotProbabilityFn }( ${ emitterSlotWeightFn }( input.origin ), emitterCount > 0u, originTotals );
@@ -228,7 +331,7 @@ export class LogicKernel extends ComputeKernel {
 						// next event estimation: pick one slot by importance (neeSlotProbability) with a single
 						// sample. MaterialKernel evaluates the bsdf and enqueues the shadow ray.
 						var lightPdf = 0.0;
-						let totals = ${ neeTotalsFn }( hitResult.position, envWeight );
+						let totals = ${ neeTotalsFn }( vertexPosition, envWeight );
 						if ( misEnabled != 0u && totals.y > 0.0 ) {
 
 							let ruv = ${ rand3 }( ${ RNG_INDEX_DIRECT_LIGHT_SAMPLE } );
@@ -247,7 +350,7 @@ export class LogicKernel extends ComputeKernel {
 							var lastProbability = 0.0;
 							for ( var li = 0u; li < lightsCount; li ++ ) {
 
-								let probability = ${ neeSlotProbabilityFn }( ${ lightSlotWeightFn }( li, hitResult.position ), ${ lightSlotActiveFn }( li ), totals );
+								let probability = ${ neeSlotProbabilityFn }( ${ lightSlotWeightFn }( li, vertexPosition ), ${ lightSlotActiveFn }( li ), totals );
 								if ( ! found && probability > 0.0 && ruv.x < cumulative + probability ) {
 
 									found = true;
@@ -281,7 +384,7 @@ export class LogicKernel extends ComputeKernel {
 							}
 							cumulative += envProbability;
 
-							let emitterProbability = ${ neeSlotProbabilityFn }( ${ emitterSlotWeightFn }( hitResult.position ), emitterCount > 0u, totals );
+							let emitterProbability = ${ neeSlotProbabilityFn }( ${ emitterSlotWeightFn }( vertexPosition ), emitterCount > 0u, totals );
 							if ( ! found && emitterProbability > 0.0 ) {
 
 								found = true;
@@ -312,11 +415,11 @@ export class LogicKernel extends ComputeKernel {
 
 							} else if ( chosen == - 3 ) {
 
-								lightRec = ${ sampleEmitterFn }( hitResult.position, remainder, ruv.yz );
+								lightRec = ${ sampleEmitterFn }( vertexPosition, remainder, ruv.yz );
 
 							} else {
 
-								lightRec = ${ randomLightSampleFn }( u32( chosen ), hitResult.position, ruv.yz );
+								lightRec = ${ randomLightSampleFn }( u32( chosen ), vertexPosition, ruv.yz );
 
 							}
 

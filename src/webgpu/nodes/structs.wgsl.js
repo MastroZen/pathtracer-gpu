@@ -290,10 +290,27 @@ export const materialStruct = new StructTypeNode( {
 	// colour, in the albedo register, is light, and the surface scatters nothing.
 	// It took a padding word, so the record keeps its size.
 	svmEmission: 'uint',
+	// THE PARTICIPATING MEDIUM of the Volume socket (the app's graph/medium.ts, from Cycles
+	// svm/closure.h): bit 0 makes the surface a NULL boundary that rays and shadow rays cross
+	// without bending (SD_HAS_ONLY_VOLUME), bit 1 says the record carries a medium that a path
+	// inside it integrates. Coefficients per metre, as separate floats for the reason the hair
+	// tint gives above. One lobe: a mix of phases with different g is fused by the app.
+	mediumFlags: 'uint',
+	mediumScatterR: 'float',
+	mediumScatterG: 'float',
+	mediumScatterB: 'float',
+	mediumAbsorptionR: 'float',
+	mediumAbsorptionG: 'float',
+	mediumAbsorptionB: 'float',
+	mediumAnisotropy: 'float',
+	mediumEmissionR: 'float',
+	mediumEmissionG: 'float',
+	mediumEmissionB: 'float',
 	// and the padding that keeps the record on the stride of four
-	_svmMixAlignment1: 'uint',
-	_svmMixAlignment2: 'uint',
-	// total size = 316
+	_mediumAlignment0: 'uint',
+	_mediumAlignment1: 'uint',
+	_mediumAlignment2: 'uint',
+	// total size = 328
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

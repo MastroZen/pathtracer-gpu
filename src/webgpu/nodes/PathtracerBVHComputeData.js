@@ -1150,7 +1150,16 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// an emission leaf: the program's colour is light (see structs.wgsl.js)
 			intArray[ index ++ ] = m.svmEmission && svmPlace ? 1 : 0;
 
+			// the participating medium (see structs.wgsl.js): no "medium" is no medium
+			const medium = m.medium ?? null;
+			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 : 0;
+			for ( const v of medium ? medium.scatter : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
+			for ( const v of medium ? medium.absorption : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
+			floatArray[ index ++ ] = medium ? medium.anisotropy : 0.0;
+			for ( const v of medium ? medium.emission : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
+
 			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
+			intArray[ index ++ ] = 0;
 			intArray[ index ++ ] = 0;
 			intArray[ index ++ ] = 0;
 

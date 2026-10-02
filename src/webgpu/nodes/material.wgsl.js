@@ -237,6 +237,22 @@ export const sampleHenyeyGreensteinFunc = wgslFn( /* wgsl */ `
 
 `, [ getBasisFromNormalFunc ] );
 
+// The Henyey-Greenstein phase function, per steradian, for light travelling along "direction"
+// and leaving along "outgoing": the density sampleHenyeyGreenstein above draws from, so the
+// sampled scatter weighs one. A positive g peaks where the two agree, which is Cycles'
+// volume_henyey_greenstein_eval with its incoming direction flipped to the travel one.
+export const henyeyGreensteinPhaseFunc = wgslFn( /* wgsl */ `
+
+	fn henyeyGreensteinPhase( direction: vec3f, outgoing: vec3f, g: f32 ) -> f32 {
+
+		let cosTheta = dot( direction, outgoing );
+		let denom = max( 1.0 + g * g - 2.0 * g * cosTheta, 1e-6 );
+		return ( 1.0 - g * g ) / ( 12.566370614359172 * denom * sqrt( denom ) );
+
+	}
+
+` );
+
 // ── SUBSURFACE: from what the user writes to what the walk wants ──
 //
 // The user writes a surface albedo and a diffusion radius. The walk wants a SINGLE

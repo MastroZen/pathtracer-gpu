@@ -10,6 +10,7 @@ import { MegaKernelPathTracer } from './MegaKernelPathTracer.js';
 import { WaveFrontPathTracer } from './WaveFrontPathTracer.js';
 import { CubeToEquirectGenerator } from '../utils/CubeToEquirectGenerator.js';
 import { PathtracerBVHComputeData } from './nodes/PathtracerBVHComputeData.js';
+import { cameraMediumIndex } from './cameraMedium.js';
 import { AtlasDebugMaterial } from './materials/debug/AtlasDebugMaterial.js';
 import { SampleDensityMaterial } from './materials/debug/SampleDensityMaterial.js';
 import { setCommonAttributes } from '../core/utils/GeometryPreparationUtils.js';
@@ -224,6 +225,33 @@ export class WebGPUPathTracer {
 
 		this._pathTracer.maxSubsurfaceSteps = v;
 		this._pathTracer.reset();
+
+	}
+
+	/**
+	 * Blender's Volume Bounces: how many times a path may scatter inside a participating
+	 * medium. Zero, the default as there, is single scattering lit by the direct light.
+	 *
+	 * @type {number}
+	 * @default 0
+	 */
+	get maxVolumeBounces() {
+
+		return this._pathTracer.maxVolumeBounces;
+
+	}
+
+	set maxVolumeBounces( v ) {
+
+		this._pathTracer.maxVolumeBounces = v;
+		this._pathTracer.reset();
+
+	}
+
+	/** The medium the camera stands in, re-read with the camera and the materials. */
+	_updateCameraMedium() {
+
+		this._pathTracer.cameraMedium = cameraMediumIndex( this.scene, this.camera, this._bvhData?.materialsMap );
 
 	}
 
@@ -921,6 +949,7 @@ export class WebGPUPathTracer {
 
 		this._bvhData.fns.getCameraRay = this._cameraRayFnHandle.fn;
 		this._cameraRayFnHandle.update();
+		this._updateCameraMedium();
 		this._pathTracer.rebuild();
 		this.reset();
 
@@ -939,6 +968,8 @@ export class WebGPUPathTracer {
 		_bvhData.updateMaterials();
 		_bvhData.textureAtlas.setTextures( _renderer, _bvhData.textures );
 		this._pathTracer.setEmitters?.( emitters );
+		// a material that became a medium, or stopped being one, may be the one around the camera
+		this._updateCameraMedium();
 		this.reset();
 
 	}
@@ -987,6 +1018,7 @@ export class WebGPUPathTracer {
 
 		}
 
+		this._updateCameraMedium();
 		this.reset();
 
 	}

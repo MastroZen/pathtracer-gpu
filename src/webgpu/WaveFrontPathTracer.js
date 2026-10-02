@@ -130,6 +130,10 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.traceShadowRayKernel.bvhData = bvhData;
 		this.traceShadowRayKernel.needsUpdate = true;
 
+		// the medium a path travels in is read from the material records
+		this.logicKernel.bvhData = bvhData;
+		this.logicKernel.needsUpdate = true;
+
 		this.reset();
 
 	}
@@ -466,6 +470,8 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				materialKernel.maxTransparentBounces = maxTransparentBounces;
 				materialKernel.maxBounces = this.maxBounces;
 				materialKernel.maxSubsurfaceSteps = this.maxSubsurfaceSteps;
+				materialKernel.maxVolumeBounces = this.maxVolumeBounces;
+				materialKernel.cameraMedium = this.cameraMedium;
 				materialKernel.targetDimensions.copy( targetDimensions );
 				renderer.compute( materialKernel.kernel, materialKernel.getDispatchSize( rayCount, 1, 1 ) );
 

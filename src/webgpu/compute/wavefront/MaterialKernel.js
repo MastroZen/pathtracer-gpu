@@ -3,10 +3,10 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, uniformArray, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR } from '../../nodes/random.wgsl.js';
+import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR, RNG_INDEX_MEDIUM_PHASE } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
-import { mixLeafFunc, applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
+import { mixLeafFunc, applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, transmissionAttenuationFunc, sampleHenyeyGreensteinFunc, henyeyGreensteinPhaseFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 import { misHeuristicFn } from '../../nodes/sampling.wgsl.js';
@@ -15,6 +15,11 @@ import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '
 import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
 import { svmRecordTexelFn, svmResultsTexture } from './SvmKernel.js';
 import { PIXEL_FILTER_TABLE_SIZE, pixelFilterReadFunc } from '../../nodes/pixelFilter.wgsl.js';
+
+// How many null boundaries of participating media one path may cross. They advance the alpha
+// depth, so the next draws are not the ones the boundary hit already used, but they are not
+// held to the transparent bounce limit: Cycles counts them apart too (volume_bounds_bounce)
+const MEDIUM_BOUNDS_MAX = 128;
 
 // Pure material evaluation and ray generation: terminated slots pull a recycled pixel and emit a
 // fresh camera ray; live slots evaluate the surface staged by LogicKernel, sample the bsdf, and
@@ -36,6 +41,12 @@ export class MaterialKernel extends ComputeKernel {
 			maxTransparentBounces: uniform( 5, 'uint' ),
 			maxBounces: uniform( 5, 'uint' ),
 			maxSubsurfaceSteps: uniform( SUBSURFACE_MAX_STEPS, 'uint' ),
+			// Blender's Volume Bounces, whose default is zero: one scatter inside a medium, lit
+			// by the direct light, and the path ends there (Cycles max_volume_bounce is it plus one)
+			maxVolumeBounces: uniform( 0, 'uint' ),
+			// the material of the medium the camera stands in, or -1: decided on the host from
+			// the camera position (WaveFrontPathTracer), the volume stack init of Cycles
+			cameraMedium: uniform( - 1, 'int' ),
 
 			sampleCountTarget: textureStore( new StorageTexture( 1, 1 ) ).toReadWrite(),
 
@@ -92,6 +103,8 @@ export class MaterialKernel extends ComputeKernel {
 				maxTransparentBounces: u32,
 				maxBounces: u32,
 				maxSubsurfaceSteps: u32,
+				maxVolumeBounces: u32,
+				cameraMedium: i32,
 				misEnabled: u32,
 				pixelFilterOn: u32,
 
@@ -207,9 +220,12 @@ export class MaterialKernel extends ComputeKernel {
 					rayDataStorage[ index ].maxDist = ray.maxDist;
 					rayDataStorage[ index ].rayIntersectionIndex = i32( rayIndex );
 					rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
-					// a camera ray starts OUTSIDE every medium
-					rayDataStorage[ index ].insideMaterial = - 1;
+					// a camera ray starts in the medium the camera stands in, which is no medium at all
+					// for a camera in the open
+					rayDataStorage[ index ].insideMaterial = cameraMedium;
 					rayDataStorage[ index ].subsurfaceSteps = 0u;
+					rayDataStorage[ index ].mediumScatter = 0u;
+					rayDataStorage[ index ].volumeBounce = 0u;
 					rayDataStorage[ index ].dispersionWavelength = - mix( ${ DISPERSION_MIN_WAVELENGTH }.0, ${ DISPERSION_MAX_WAVELENGTH }.0, ${ rand1 }( ${ RNG_INDEX_DISPERSION_WAVELENGTH } ) );
 
 					// write the active params & dispatched flag
@@ -222,6 +238,90 @@ export class MaterialKernel extends ComputeKernel {
 					// the walk step counts like a bounce here: without it every step of a walk would
 					// draw the same numbers, and the path would march in a straight line
 					${ rngInit }( indexUV, input.seed, input.currentBounce + input.alphaDepth + input.subsurfaceSteps );
+
+					// the path is inside a participating medium, not a subsurface walk
+					let inMediumPath = input.insideMaterial >= 0
+						&& ( ${ materialsBuffer }[ u32( input.insideMaterial ) ].mediumFlags & 2u ) != 0u;
+					let inSubsurface = input.insideMaterial >= 0 && ! inMediumPath;
+
+					// -- A SCATTER INSIDE THE MEDIUM, at the point LogicKernel chose --
+					//
+					// There is no surface here: the next direction is drawn from the phase function,
+					// which weighs one against its own pdf, and the light LogicKernel picked from this
+					// point is weighed by the same phase. When the volume bounce budget is spent the
+					// path ends after the direct light, and that light takes the whole weight since no
+					// bounce will find it from here - Cycles keeps the ray going through transparent
+					// stuff only, which gathers the same light in expectation.
+					if ( input.mediumScatter == 1u ) {
+
+						let g = ${ materialsBuffer }[ u32( input.insideMaterial ) ].mediumAnisotropy;
+						let scatterPoint = input.origin + input.direction * input.dist;
+						let newBounce = input.currentBounce + 1u;
+						let newVolumeBounce = input.volumeBounce + 1u;
+						let budgetSpent = newVolumeBounce > maxVolumeBounces || newBounce >= maxBounces;
+
+						let nextDirection = ${ sampleHenyeyGreensteinFunc }( input.direction, g, ${ rand2 }( ${ RNG_INDEX_MEDIUM_PHASE } ) );
+						let phasePdf = ${ henyeyGreensteinPhaseFunc }( input.direction, nextDirection, g );
+						var phaseColor = vec3f( phasePdf );
+						var isTerminated = budgetSpent;
+						if ( ! isTerminated && newBounce >= 3u ) {
+
+							let rrProb = saturate( sqrt( max( max( input.throughputColor.r, input.throughputColor.g ), input.throughputColor.b ) ) );
+							isTerminated = rrProb <= 0.0 || ${ rand1 }( ${ RNG_INDEX_RUSSIAN_ROULETTE } ) > rrProb;
+							if ( ! isTerminated ) { phaseColor /= rrProb; }
+
+						}
+
+						rayDataStorage[ index ].currentBounce = newBounce;
+						rayDataStorage[ index ].volumeBounce = newVolumeBounce;
+						rayDataStorage[ index ].emission = vec3f( 0.0 );
+						rayDataStorage[ index ].isFullyTransmissive = 0u;
+						rayDataStorage[ index ].scatterColor = phaseColor;
+						rayDataStorage[ index ].scatterPdf = select( phasePdf, 0.0, isTerminated );
+						rayDataStorage[ index ].minPdf = min( input.minPdf, phasePdf );
+
+						if ( ! isTerminated ) {
+
+							let rayIndex = atomicAdd( &rayQueue.length, 1u );
+							rayQueue.elements[ rayIndex ].origin = scatterPoint;
+							rayQueue.elements[ rayIndex ].direction = nextDirection;
+							rayQueue.elements[ rayIndex ].pixelIndex = input.pixelIndex;
+							rayQueue.elements[ rayIndex ].currentBounce = newBounce;
+							rayQueue.elements[ rayIndex ].seed = input.seed;
+							rayQueue.elements[ rayIndex ].alphaDepth = input.alphaDepth;
+							rayQueue.elements[ rayIndex ].maxDist = 0.0;
+							rayDataStorage[ index ].rayIntersectionIndex = i32( rayIndex );
+							rayDataStorage[ index ].origin = scatterPoint;
+							rayDataStorage[ index ].direction = nextDirection;
+
+						}
+
+						if ( input.lightPdf > 0.0 ) {
+
+							let phase = ${ henyeyGreensteinPhaseFunc }( input.direction, input.lightDirection, g );
+							rayDataStorage[ index ].lightBsdf = vec3f( phase );
+							rayDataStorage[ index ].lightBsdfPdf = select( phase, 0.0, budgetSpent );
+
+							let shadowIndex = atomicAdd( &shadowRayQueue.length, 1u );
+							shadowRayQueue.elements[ shadowIndex ].origin = scatterPoint;
+							shadowRayQueue.elements[ shadowIndex ].direction = input.lightDirection;
+							shadowRayQueue.elements[ shadowIndex ].pixelIndex = input.pixelIndex;
+							shadowRayQueue.elements[ shadowIndex ].currentBounce = input.currentBounce;
+							shadowRayQueue.elements[ shadowIndex ].seed = input.seed;
+							shadowRayQueue.elements[ shadowIndex ].alphaDepth = input.alphaDepth;
+							shadowRayQueue.elements[ shadowIndex ].maxDist = input.lightDist - ${ LIGHT_EPSILON };
+							shadowRayQueue.elements[ shadowIndex ].medium = input.insideMaterial;
+							rayDataStorage[ index ].shadowRayIntersectionIndex = i32( shadowIndex );
+
+						} else {
+
+							rayDataStorage[ index ].lightPdf = 0.0;
+							rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+
+						}
+						return;
+
+					}
 
 					// ── SUBSURFACE: THE WALK INSIDE THE VOLUME ──
 					//
@@ -268,7 +368,7 @@ export class MaterialKernel extends ComputeKernel {
 					// memory the gain evaporated, which is the whole lesson: an optimisation
 					// measured on a broken foundation measures the foundation.
 					var walkTransmittance = vec3f( 1.0 );
-					if ( input.insideMaterial >= 0 ) {
+					if ( inSubsurface ) {
 
 						let medium = ${ materialsBuffer }[ u32( input.insideMaterial ) ];
 
@@ -375,6 +475,58 @@ export class MaterialKernel extends ComputeKernel {
 
 					let objectInfo = ${ transformsBuffer }[ u32( input.objectIndex ) ];
 					var materialInfo = ${ materialsBuffer }[ objectInfo.materialIndex ];
+
+					// -- THE NULL BOUNDARY of a material that is only a medium (SD_HAS_ONLY_VOLUME) --
+					//
+					// Nothing to shade: the ray carries on straight, like an alpha pass through, and
+					// what changes is the medium it travels in - entered from the front, left from
+					// the back. One medium at a time: entering another replaces it, which is the
+					// declared divergence from the volume stack of Cycles.
+					if ( ( materialInfo.mediumFlags & 1u ) != 0u && input.isCurve == 0u ) {
+
+						if ( input.alphaDepth >= ${ MEDIUM_BOUNDS_MAX }u ) {
+
+							rayDataStorage[ index ].throughputColor = vec3f( 0.0 );
+							rayDataStorage[ index ].emission = vec3f( 0.0 );
+							rayDataStorage[ index ].lightPdf = 0.0;
+							rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+							return;
+
+						}
+
+						var insideNext = input.insideMaterial;
+						if ( input.side > 0.0 ) {
+
+							insideNext = i32( objectInfo.materialIndex );
+
+						} else if ( input.insideMaterial == i32( objectInfo.materialIndex ) ) {
+
+							insideNext = - 1;
+
+						}
+
+						let boundaryPoint = input.origin + input.direction * input.dist;
+						let crossIndex = atomicAdd( &rayQueue.length, 1u );
+						rayQueue.elements[ crossIndex ].origin = ${ offsetRayOriginFunc }( boundaryPoint, input.direction, input.normal );
+						rayQueue.elements[ crossIndex ].direction = input.direction;
+						rayQueue.elements[ crossIndex ].pixelIndex = input.pixelIndex;
+						rayQueue.elements[ crossIndex ].currentBounce = input.currentBounce;
+						rayQueue.elements[ crossIndex ].seed = input.seed;
+						rayQueue.elements[ crossIndex ].alphaDepth = input.alphaDepth + 1u;
+						rayQueue.elements[ crossIndex ].maxDist = max( input.maxDist - input.dist, 0.0 );
+
+						// the same staging as the alpha pass through below: the throughput is left as it is
+						rayDataStorage[ index ].alphaDepth = input.alphaDepth + 1u;
+						rayDataStorage[ index ].emission = vec3f( 0.0 );
+						rayDataStorage[ index ].scatterColor = vec3f( input.scatterPdf );
+						rayDataStorage[ index ].lightPdf = 0.0;
+						rayDataStorage[ index ].origin = rayQueue.elements[ crossIndex ].origin;
+						rayDataStorage[ index ].rayIntersectionIndex = i32( crossIndex );
+						rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+						rayDataStorage[ index ].insideMaterial = insideNext;
+						return;
+
+					}
 					// the emitter density of the TRIANGLE's material, read before a mix picks another
 					// branch: the table knows only the material the mesh wears. Curves are never in it
 					let emitterAreaPdf = select( materialInfo.emitterAreaPdf, 0.0, input.isCurve == 1u );
@@ -475,7 +627,7 @@ export class MaterialKernel extends ComputeKernel {
 					var hitNormal = input.normal;
 					var hitSide = input.side;
 					var view = - input.direction;
-					if ( input.insideMaterial >= 0 ) {
+					if ( inSubsurface ) {
 
 						// "input.normal" always faces the incoming ray, so on the way out it points
 						// INTO the volume: the geometric one is input.normal * input.side, and it is
@@ -576,7 +728,7 @@ export class MaterialKernel extends ComputeKernel {
 					var throughputColor = input.throughputColor;
 					// what the medium absorbed on the way to this wall. One everywhere else, so
 					// the multiplication costs nothing when there is no volume.
-					if ( input.insideMaterial >= 0 ) {
+					if ( inSubsurface ) {
 
 						throughputColor *= walkTransmittance;
 						rayDataStorage[ index ].throughputColor = throughputColor;
@@ -779,7 +931,7 @@ export class MaterialKernel extends ComputeKernel {
 					// a hit that goes in has PICKED the bssrdf closure, so the surface one is not
 					// there to be lit: see the NEE block at the bottom
 					var enteredSubsurface = false;
-					if ( input.insideMaterial >= 0 ) {
+					if ( inSubsurface ) {
 
 						// the path was travelling inside and has reached the surface: it leaves.
 						// The sampled direction already points outward, because the surface above
@@ -919,6 +1071,8 @@ export class MaterialKernel extends ComputeKernel {
 							shadowRayQueue.elements[ shadowIndex ].seed = input.seed;
 							shadowRayQueue.elements[ shadowIndex ].alphaDepth = input.alphaDepth;
 							shadowRayQueue.elements[ shadowIndex ].maxDist = input.lightDist - ${ LIGHT_EPSILON };
+							// a surface inside a medium sends its shadow ray from inside it
+							shadowRayQueue.elements[ shadowIndex ].medium = select( - 1, input.insideMaterial, inMediumPath );
 							rayDataStorage[ index ].shadowRayIntersectionIndex = i32( shadowIndex );
 
 						} else {

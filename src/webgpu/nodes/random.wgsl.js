@@ -27,6 +27,11 @@ export const RNG_INDEX_SUBSURFACE_WALK = 17;
 // a due estrazioni diverse dentro lo stesso colpo.
 export const RNG_INDEX_HAIR = 18;
 
+// A PARTICIPATING MEDIUM: the channel and the distance of the scatter along a segment, drawn
+// in LogicKernel, and the two of the phase direction, drawn in MaterialKernel at that point
+export const RNG_INDEX_MEDIUM = 24;
+export const RNG_INDEX_MEDIUM_PHASE = 26;
+
 export const RNG_INDEX_ALPHA_TEST = 50;
 import { contextProxyFn } from 'three-mesh-bvh/webgpu';
 import * as sobol from './rand/sobol.wgsl.js';

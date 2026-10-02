@@ -104,6 +104,14 @@ export const rayDataStruct = new StructTypeNode( {
 	// left: LogicKernel writes it, MaterialKernel weighs the emission of the surface with it
 	emitterSelectPdf: 'float',
 
+	// 1 when LogicKernel decided the traced segment SCATTERS inside the medium the path is in,
+	// at "dist" along it: MaterialKernel then samples the phase function there instead of
+	// shading the surface the segment reached (Cycles shade_volume.h)
+	mediumScatter: 'uint',
+
+	// how many times the path has scattered inside a medium, against the volume bounce limit
+	// of Cycles, which is a budget apart from the surface bounces
+	volumeBounce: 'uint',
 
 }, 'RayData' );
 
@@ -119,7 +127,9 @@ export const traceQueuedRayStruct = new StructTypeNode( {
 	seed: 'uint',
 	alphaDepth: 'uint',
 	maxDist: 'float',
-	_alignment0: 'uint',
+	// a SHADOW ray starts inside this medium (a material index), or -1: the shadow kernel
+	// attenuates it until it crosses that medium's boundary. Bounce rays leave it unread
+	medium: 'int',
 
 }, 'TraceQueuedRay' );
 
