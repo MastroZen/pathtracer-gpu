@@ -6,7 +6,7 @@ import { rngInit } from '../../nodes/random.wgsl.js';
 import { rayQueueStruct, intersectionResultStruct } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
-import { mediumDensityFunc, mediumMajorantFunc, mediumRatioTrackingFunc } from '../../nodes/medium.wgsl.js';
+import { mediumDensityFunc, mediumMajorantFunc, mediumPointFunc, mediumRatioTrackingFunc } from '../../nodes/medium.wgsl.js';
 
 // How many null boundaries of participating media a shadow ray crosses before it gives up and
 // counts as unoccluded with the transmittance gathered so far: entering and leaving a fog box is
@@ -59,7 +59,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		if ( registers > 0 ) {
 
 			const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
-			const densityFn = mediumDensityFunc( materialsBuffer, transformsBuffer, svmRunFn, registers );
+			const densityFn = mediumDensityFunc( mediumPointFunc( materialsBuffer, transformsBuffer, svmRunFn, registers ) );
 			ratioTrackingFn = mediumRatioTrackingFunc( materialsBuffer, densityFn, mediumMajorantFunc( densityFn, materialsBuffer ) );
 
 		}

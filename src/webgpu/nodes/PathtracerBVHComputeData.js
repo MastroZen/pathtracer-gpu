@@ -1171,11 +1171,25 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			intArray[ index ++ ] = mediumPlace ? mediumPlace.codeWord : 0;
 			intArray[ index ++ ] = mediumPlace ? mediumPlace.count : 0;
 			intArray[ index ++ ] = mediumPlace ? mediumPlace.constWord : 0;
-			intArray[ index ++ ] = mediumPlace ? svmReg( m.svmMediumProgram.outputs[ 0 ] ) : 255;
+			// the registers of the five pins (the app's MEDIUM_PINS): density, emission strength,
+			// emission colour and blackbody intensity in one word, the temperature in the next
+			const mediumReg = k => ( mediumPlace ? svmReg( m.svmMediumProgram.outputs[ k ] ) : 255 );
+			intArray[ index ++ ] = mediumReg( 0 ) | ( mediumReg( 1 ) << 8 ) | ( mediumReg( 2 ) << 16 ) | ( mediumReg( 3 ) << 24 );
 			const space = medium?.textureSpace ?? { min: [ - 0.5, - 0.5, - 0.5 ], size: [ 1, 1, 1 ] };
 			for ( const v of space.min ) floatArray[ index ++ ] = v;
 			for ( const v of space.size ) floatArray[ index ++ ] = v;
 			floatArray[ index ++ ] = medium?.densityMax ?? 0.0;
+			intArray[ index ++ ] = mediumReg( 4 );
+			const parts = medium?.wired?.parts ?? null;
+			for ( const v of parts ? parts.color : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
+			floatArray[ index ++ ] = parts ? parts.strength : 0.0;
+			floatArray[ index ++ ] = parts ? parts.temperature : 0.0;
+			floatArray[ index ++ ] = parts ? parts.blackbodyIntensity : 0.0;
+			for ( const v of parts ? parts.blackbodyTint : [ 1, 1, 1 ] ) floatArray[ index ++ ] = v;
+
+			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
+			intArray[ index ++ ] = 0;
+			intArray[ index ++ ] = 0;
 
 			if ( index - recordStart !== recordLength ) {
 

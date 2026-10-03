@@ -6,7 +6,7 @@ import { rayDataStruct, intersectionResultStruct } from './structs.js';
 import { SVM_REGISTERS } from '../../nodes/svm.wgsl.js';
 import { clampPathContributionFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_FAR_DISTANCE } from '../../nodes/lights.wgsl.js';
-import { MEDIUM_MAX_STEPS, mediumRandFn, mediumDensityFunc, mediumMajorantFunc } from '../../nodes/medium.wgsl.js';
+import { MEDIUM_MAX_STEPS, mediumRandFn, mediumDensityFunc, mediumMajorantFunc, mediumPointFunc } from '../../nodes/medium.wgsl.js';
 
 // -- THE SEGMENTS THROUGH A HETEROGENEOUS MEDIUM, before LogicKernel --
 //
@@ -46,7 +46,10 @@ export class VolumeKernel extends ComputeKernel {
 		const materials = proxy( 'bvhData.value.storage.materials', params );
 		const transforms = proxy( 'bvhData.value.storage.transforms', params );
 		const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
-		const densityFn = mediumDensityFunc( materials, transforms, svmRunFn, registers );
+		// the density AND the emission of a point, from one run: a wired Temperature or Emission
+		// Strength is the fire, and its emission follows the field instead of filling the container
+		const pointFn = mediumPointFunc( materials, transforms, svmRunFn, registers );
+		const densityFn = mediumDensityFunc( pointFn );
 		const majorantFn = mediumMajorantFunc( densityFn, materials );
 
 		const fn = wgslTagFn/* wgsl */`
@@ -85,7 +88,6 @@ export class VolumeKernel extends ComputeKernel {
 
 				let sigmaS = vec3f( ${ materials }[ material ].mediumScatterR, ${ materials }[ material ].mediumScatterG, ${ materials }[ material ].mediumScatterB );
 				let sigmaT = sigmaS + vec3f( ${ materials }[ material ].mediumAbsorptionR, ${ materials }[ material ].mediumAbsorptionG, ${ materials }[ material ].mediumAbsorptionB );
-				let emission = vec3f( ${ materials }[ material ].mediumEmissionR, ${ materials }[ material ].mediumEmissionG, ${ materials }[ material ].mediumEmissionB );
 				// the throughput the segment starts with: LogicKernel applies the last scatter after
 				let beta = input.throughputColor * input.scatterColor / input.scatterPdf;
 				let unitMax = max( sigmaT.r, max( sigmaT.g, sigmaT.b ) );
@@ -96,8 +98,10 @@ export class VolumeKernel extends ComputeKernel {
 				var gathered = vec3f( 0.0 );
 				if ( unitMax <= 0.0 ) {
 
-					// nothing scatters or absorbs: the emission of the whole stretch
-					gathered = emission * min( segment, 1e4 );
+					// nothing scatters or absorbs: the emission of the stretch, by one point drawn
+					// uniformly along it - the integral of a field, estimated without bias
+					let len = min( segment, 1e4 );
+					gathered = ${ pointFn }( material, objectSlot, input.origin + input.direction * len * ${ mediumRandFn }( &rng ) ).xyz * len;
 
 				} else {
 
@@ -107,8 +111,9 @@ export class VolumeKernel extends ComputeKernel {
 						t -= log( max( 1.0 - ${ mediumRandFn }( &rng ), 1e-9 ) ) / sigmaBar;
 						if ( t >= segment ) { break; }
 
-						let density = ${ densityFn }( material, objectSlot, input.origin + input.direction * t );
-						gathered += weight * emission / sigmaBar;
+						let sample = ${ pointFn }( material, objectSlot, input.origin + input.direction * t );
+						let density = sample.w;
+						gathered += weight * sample.xyz / sigmaBar;
 
 						let realScatter = sigmaS * density;
 						let nullSigma = vec3f( sigmaBar ) - sigmaT * density;

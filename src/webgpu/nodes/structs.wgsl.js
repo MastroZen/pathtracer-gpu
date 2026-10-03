@@ -325,7 +325,24 @@ export const materialStruct = new StructTypeNode( {
 	// grid (the app's graph/medium.ts densityBound): the majorant of every walk. Zero is unknown -
 	// a program that reads an image - and the walk estimates one per segment
 	mediumDensityMax: 'float',
-	// total size = 336
+	// THE FIRE (Cycles svm_node_principled_volume): the register of a wired Temperature, and the
+	// sockets of the emission that stay numbers - the emission colour, linear, its strength, the
+	// temperature in kelvin, the blackbody intensity and tint. A heterogeneous medium recomputes
+	// its emission from these at every point; a homogeneous one reads the total above
+	mediumSvmOutput2: 'uint',
+	mediumEmissionColorR: 'float',
+	mediumEmissionColorG: 'float',
+	mediumEmissionColorB: 'float',
+	mediumEmissionStrength: 'float',
+	mediumTemperature: 'float',
+	mediumBlackbodyIntensity: 'float',
+	mediumBlackbodyTintR: 'float',
+	mediumBlackbodyTintG: 'float',
+	mediumBlackbodyTintB: 'float',
+	// and the padding that keeps the record on the stride of four
+	_mediumAlignment0: 'uint',
+	_mediumAlignment1: 'uint',
+	// total size = 348
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

@@ -472,9 +472,13 @@ export class LogicKernel extends ComputeKernel {
 							let bg = ${ sampleBackground }( input.direction, rng );
 							if ( input.currentBounce == 0u ) {
 
-								// sample the background directly if this is the primary ray
+								// sample the background directly if this is the primary ray. ADDED to what the
+								// camera segments gathered, not assigned over it: a medium crossed on the way out
+								// - a fire in front of the sky - emits into the path before it escapes, and the
+								// assignment erased it (measured: an emitting slab in front of the void read zero,
+								// and 0.5000 with a black wall behind). The alpha stays the background's
 								let background = ${ clampPathContributionFunc }( bg.a * bg.rgb, input.currentBounce, clampDirect, clampIndirect );
-								resultColor = vec4f( background, bg.a );
+								resultColor = vec4f( resultColor.rgb + background, bg.a );
 
 							} else {
 
