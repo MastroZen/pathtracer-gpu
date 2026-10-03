@@ -58,14 +58,17 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.rayQueue = new StorageBufferAttribute( new Float32Array( queueSize ), queueSize );
 		this.rayQueue.name = 'Ray Queue';
 
-		this.shadowRayQueue = new StorageBufferAttribute( new Float32Array( queueSize ), queueSize );
+		// the shadow queue holds TWO rays a slot: the NEE of the vertex, and the direct light of a
+		// medium segment that LogicKernel queues from a point along it (docs/mezzi.md in the app)
+		const shadowQueueSize = rayQueueStruct.getLength() + 2 * MAX_RAY_DATA_COUNT * traceQueuedRayStruct.getLength();
+		this.shadowRayQueue = new StorageBufferAttribute( new Float32Array( shadowQueueSize ), shadowQueueSize );
 		this.shadowRayQueue.name = 'Shadow Ray Queue';
 
 		// per-queue-slot trace results, indexed by the ray's position in its queue
 		this.rayIntersectionsStorage = new StorageBufferAttribute( MAX_RAY_DATA_COUNT, intersectionResultStruct.getLength() );
 		this.rayIntersectionsStorage.name = 'Ray Intersections';
 
-		this.shadowRayIntersectionsStorage = new StorageBufferAttribute( MAX_RAY_DATA_COUNT, intersectionResultStruct.getLength() );
+		this.shadowRayIntersectionsStorage = new StorageBufferAttribute( 2 * MAX_RAY_DATA_COUNT, intersectionResultStruct.getLength() );
 		this.shadowRayIntersectionsStorage.name = 'Shadow Ray Intersections';
 
 		// overflow pixel indices waiting for a free path slot, lazily sized to the resolution
@@ -489,20 +492,24 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 				}
 
+				// the shadow queue is reset BEFORE LogicKernel, which reads only last frame's shadow
+				// RESULTS and queues the direct light of the medium segments it resolves
+				zeroDispatchKernel.target = shadowRayQueue;
+				renderer.compute( zeroDispatchKernel.kernel, [ 1 ] );
+
 				// Step 1: resolve last frame's trace results — accumulate NEE / emission / env, terminate
 				// finished paths into the output, and pick the next NEE light for each live path
 				logicKernel.rayDataStorage = rayDataStorage;
+				logicKernel.shadowRayQueue = shadowRayQueue;
+				logicKernel.maxVolumeBounces = this.maxVolumeBounces;
 				logicKernel.rayIntersectionsStorage = rayIntersectionsStorage;
 				logicKernel.shadowRayIntersectionsStorage = shadowRayIntersectionsStorage;
 				logicKernel.maxBounces = this.maxBounces;
 				logicKernel.rayCount = rayCount;
 				renderer.compute( logicKernel.kernel, logicKernel.getDispatchSize( rayCount, 1, 1 ) );
 
-				// Step 2: reset the trace queues for this frame's population
+				// Step 2: reset the bounce queue for this frame's population
 				zeroDispatchKernel.target = rayQueue;
-				renderer.compute( zeroDispatchKernel.kernel, [ 1 ] );
-
-				zeroDispatchKernel.target = shadowRayQueue;
 				renderer.compute( zeroDispatchKernel.kernel, [ 1 ] );
 
 				// Step 2b: resolve the node tree of the staged hits - the leaf of a Mix Shader

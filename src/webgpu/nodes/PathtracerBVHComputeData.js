@@ -1163,7 +1163,10 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			const medium = m.medium ?? null;
 			const mediumPlace = svm.mediumPlacements[ i ];
 			if ( medium && mediumPlace ) svmMediums ++;
-			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 | ( mediumPlace ? 4 : 0 ) : 0;
+			// bits 3 and 4: the material's Volume Sampling - Distance, or Equiangular alone; neither is
+			// Multiple Importance, the default
+			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 | ( mediumPlace ? 4 : 0 )
+				| ( medium.sampling === 'distance' ? 8 : 0 ) | ( medium.sampling === 'equiangular' ? 16 : 0 ) : 0;
 			for ( const v of medium ? medium.scatter : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			for ( const v of medium ? medium.absorption : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			floatArray[ index ++ ] = medium ? medium.anisotropy : 0.0;

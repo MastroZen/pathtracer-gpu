@@ -117,6 +117,12 @@ export const rayDataStruct = new StructTypeNode( {
 	// Generated coordinates of a heterogeneous density are that object's
 	insideObject: 'int',
 
+	// THE DIRECT LIGHT OF A MEDIUM SEGMENT, kept apart from the scatter as Cycles keeps it: the
+	// shadow ray LogicKernel queued from a point of the segment, or -1, and what it brings when
+	// nothing occludes it. A second channel beside the vertex NEE, resolved the next frame
+	mediumShadowIndex: 'int',
+	mediumDirect: 'vec3f',
+
 }, 'RayData' );
 
 // A ray queued for BVH traversal by the trace kernels. A "maxDist" of zero traces unbounded.

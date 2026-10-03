@@ -222,6 +222,7 @@ export class MaterialKernel extends ComputeKernel {
 					rayDataStorage[ index ].maxDist = ray.maxDist;
 					rayDataStorage[ index ].rayIntersectionIndex = i32( rayIndex );
 					rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
+					rayDataStorage[ index ].mediumShadowIndex = - 1;
 					// a camera ray starts in the medium the camera stands in, which is no medium at all
 					// for a camera in the open
 					rayDataStorage[ index ].insideMaterial = cameraMedium;

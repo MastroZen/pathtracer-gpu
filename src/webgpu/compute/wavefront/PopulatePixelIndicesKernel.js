@@ -56,6 +56,7 @@ export class PopulatePixelIndicesKernel extends ComputeKernel {
 					rayDataStorage[ pixelIndex ].alphaDepth = 0u;
 					rayDataStorage[ pixelIndex ].rayIntersectionIndex = - 1;
 					rayDataStorage[ pixelIndex ].shadowRayIntersectionIndex = - 1;
+					rayDataStorage[ pixelIndex ].mediumShadowIndex = - 1;
 
 				} else {
 

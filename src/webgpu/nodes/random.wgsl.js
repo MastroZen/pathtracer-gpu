@@ -31,6 +31,12 @@ export const RNG_INDEX_HAIR = 18;
 // in LogicKernel, and the two of the phase direction, drawn in MaterialKernel at that point
 export const RNG_INDEX_MEDIUM = 24;
 export const RNG_INDEX_MEDIUM_PHASE = 26;
+// and the four of the EQUIANGULAR anchor of a segment: the light, the point on it, the strategy
+export const RNG_INDEX_MEDIUM_ANCHOR = 28;
+// the point of the segment its DIRECT light is estimated from (channel and distance), and the
+// light picked from there: a draw apart from the continuation's, which decides another thing
+export const RNG_INDEX_MEDIUM_DIRECT = 32;
+export const RNG_INDEX_MEDIUM_LIGHT = 34;
 
 export const RNG_INDEX_ALPHA_TEST = 50;
 import { contextProxyFn } from 'three-mesh-bvh/webgpu';

@@ -294,7 +294,8 @@ export const materialStruct = new StructTypeNode( {
 	// svm/closure.h): bit 0 makes the surface a NULL boundary that rays and shadow rays cross
 	// without bending (SD_HAS_ONLY_VOLUME), bit 1 says the record carries a medium that a path
 	// inside it integrates, bit 2 that it is HETEROGENEOUS: the coefficients are at density one,
-	// and the program below gives the density at every point. Coefficients per metre, as separate floats for the reason the hair
+	// and the program below gives the density at every point; bits 3 and 4 are the material's
+	// Volume Sampling of a homogeneous segment's direct light: Distance, or Equiangular alone. Coefficients per metre, as separate floats for the reason the hair
 	// tint gives above. One lobe: a mix of phases with different g is fused by the app.
 	mediumFlags: 'uint',
 	mediumScatterR: 'float',
