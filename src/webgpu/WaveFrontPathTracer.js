@@ -538,8 +538,10 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				materialKernel.maxBounces = this.maxBounces;
 				materialKernel.maxSubsurfaceSteps = this.maxSubsurfaceSteps;
 				materialKernel.maxVolumeBounces = this.maxVolumeBounces;
-				materialKernel.cameraMedium = this.cameraMedium;
-				materialKernel.cameraMediumObject = this.cameraMediumObject;
+				materialKernel.cameraMedium0 = this.cameraMediumStack[ 0 ];
+				materialKernel.cameraMedium1 = this.cameraMediumStack[ 1 ];
+				materialKernel.cameraMedium2 = this.cameraMediumStack[ 2 ];
+				materialKernel.cameraMedium3 = this.cameraMediumStack[ 3 ];
 				materialKernel.targetDimensions.copy( targetDimensions );
 				renderer.compute( materialKernel.kernel, materialKernel.getDispatchSize( rayCount, 1, 1 ) );
 

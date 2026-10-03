@@ -17,6 +17,7 @@ import {
 import { ENVIRONMENT_LIGHT_TYPE, LIGHT_EPSILON, LIGHT_FAR_DISTANCE, isMISWeightLightFn, neeSlotProbabilityFn } from '../../nodes/lights.wgsl.js';
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
 import { henyeyGreensteinPhaseFunc } from '../../nodes/material.wgsl.js';
+import { mediumStackCoefficientsFunc, mediumStackFlagsFunc, mediumStackPhaseFunc, mediumStackPhaseWeightsFunc } from '../../nodes/mediumStack.wgsl.js';
 import { rayDataStruct, intersectionResultStruct, rayQueueAtomicStruct } from './structs.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 
@@ -79,6 +80,11 @@ export class LogicKernel extends ComputeKernel {
 		const emitterSlotWeightFn = proxyFn( 'lightsInfo.value.emitterSlotWeight', params );
 		const neeTotalsFn = proxyFn( 'lightsInfo.value.neeTotals', params );
 		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
+		// the stack of media a path is in, read from the records of its entries
+		const stackFlagsFn = mediumStackFlagsFunc( materialsBuffer );
+		const stackCoefficientsFn = mediumStackCoefficientsFunc( materialsBuffer );
+		const stackPhaseWeightsFn = mediumStackPhaseWeightsFunc( materialsBuffer );
+		const stackPhaseFn = mediumStackPhaseFunc( materialsBuffer, henyeyGreensteinPhaseFunc );
 
 		// -- THE NEE CHOICE -- one slot by importance (neeSlotProbability) with a single number: walk
 		// the slots in a fixed order - lights, environment, table - to the one whose share of [0, 1)
@@ -350,13 +356,16 @@ export class LogicKernel extends ComputeKernel {
 					// only absorbs draws nothing and takes its transmittance. The emission of the
 					// whole segment is added either way, being an integral that does not depend on
 					// the draw. A heterogeneous medium keeps the one shared point (docs/mezzi.md in
-					// the app).
-					let mediumFlags = select( 0u, ${ materialsBuffer }[ u32( max( input.insideMaterial, 0 ) ) ].mediumFlags, input.insideMaterial >= 0 );
-					// a HETEROGENEOUS medium was walked by VolumeKernel before this kernel: its
-					// weight is already in the throughput, and its answer is the scatter flag and
-					// distance in the ray data. Lights seen through it take no attenuation - the
-					// declared divergence (docs/mezzi.md in the app)
-					let heterogeneous = ( mediumFlags & 6u ) == 6u;
+					// the app). The media are the path's STACK, summed as Cycles sums the closures of
+					// every entry; a subsurface walk integrates its own volume, and the media around
+					// it wait for the path to leave it, as there
+					let stackInfo = select( vec2u( 0u ), ${ stackFlagsFn }( input.mediumStack ), input.insideMaterial < 0 );
+					let mediumFlags = stackInfo.x;
+					// a stack with a HETEROGENEOUS medium was walked by VolumeKernel before this
+					// kernel: its weight is already in the throughput, and its answer is the scatter
+					// flag and distance in the ray data. Lights seen through it take no attenuation -
+					// the declared divergence (docs/mezzi.md in the app)
+					let heterogeneous = ( mediumFlags & 4u ) != 0u;
 					let inMedium = ( mediumFlags & 2u ) != 0u && ! heterogeneous;
 					var sigmaT = vec3f( 0.0 );
 					var channelP = vec3f( 0.0 );
@@ -372,10 +381,12 @@ export class LogicKernel extends ComputeKernel {
 					}
 					if ( inMedium ) {
 
-						let m = u32( input.insideMaterial );
-						let sigmaS = vec3f( ${ materialsBuffer }[ m ].mediumScatterR, ${ materialsBuffer }[ m ].mediumScatterG, ${ materialsBuffer }[ m ].mediumScatterB );
-						sigmaT = sigmaS + vec3f( ${ materialsBuffer }[ m ].mediumAbsorptionR, ${ materialsBuffer }[ m ].mediumAbsorptionG, ${ materialsBuffer }[ m ].mediumAbsorptionB );
-						let mediumEmission = vec3f( ${ materialsBuffer }[ m ].mediumEmissionR, ${ materialsBuffer }[ m ].mediumEmissionG, ${ materialsBuffer }[ m ].mediumEmissionB );
+						let coefficients = ${ stackCoefficientsFn }( input.mediumStack );
+						let sigmaS = coefficients[ 0 ];
+						sigmaT = coefficients[ 1 ];
+						let mediumEmission = coefficients[ 2 ];
+						// the weights of the entries' phases, constant along a homogeneous segment
+						let phaseWeights = ${ stackPhaseWeightsFn }( input.mediumStack );
 						if ( any( mediumEmission > vec3f( 0.0 ) ) ) {
 
 							// the integral of the emission times the transmittance, and its limit L
@@ -429,7 +440,7 @@ export class LogicKernel extends ComputeKernel {
 								// (measured: 5.6% off against 3.7% from the start, equiangular). By distance
 								// there is no anchor, and the light is chosen at the point itself, which sees
 								// it (18.9% off chosen at the start, 5.1% at the point)
-								let distanceOnly = ( mediumFlags & 8u ) != 0u;
+								let distanceOnly = stackInfo.y == 0u;
 								var choice = vec3f( - 1.0, 0.0, 0.0 );
 								if ( ! distanceOnly ) {
 
@@ -467,7 +478,7 @@ export class LogicKernel extends ComputeKernel {
 								var td = - log( max( 1.0 - rd.y * reach[ directChannel ], 1e-12 ) ) / max( sigmaT[ directChannel ], 1e-9 );
 								// Equiangular alone draws every point by the angle, as Cycles does; without an
 								// anchor it falls back on the distance
-								let angleOnly = ( mediumFlags & 16u ) != 0u;
+								let angleOnly = stackInfo.y == 1u;
 								let byAngle = useEquiangular && ( angleOnly || ra.w < 0.5 );
 								if ( byAngle ) {
 
@@ -505,8 +516,7 @@ export class LogicKernel extends ComputeKernel {
 								}
 								if ( lightRec.pdf > 0.0 && pointWeight > 0.0 ) {
 
-									let g = ${ materialsBuffer }[ m ].mediumAnisotropy;
-									let phase = ${ henyeyGreensteinPhaseFunc }( input.direction, lightRec.direction, g );
+									let phase = ${ stackPhaseFn }( input.mediumStack, phaseWeights, input.direction, lightRec.direction );
 									let seenPdf = lightRec.pdf * ${ neeSlotChoiceFn }( slot, directPoint, envWeight, envActive );
 									let misWeight = select( 1.0, ${ misHeuristicFn }( seenPdf, phase ), ${ isMISWeightLightFn }( lightRec.lightType ) && ! budgetSpent );
 									let direct = throughputColor * sigmaS * directT * pointWeight * phase * lightRec.emission * misWeight / ( lightRec.pdf * choice.y );
@@ -520,8 +530,7 @@ export class LogicKernel extends ComputeKernel {
 										shadowRayQueue.elements[ shadowIndex ].seed = input.seed;
 										shadowRayQueue.elements[ shadowIndex ].alphaDepth = input.alphaDepth;
 										shadowRayQueue.elements[ shadowIndex ].maxDist = lightRec.dist - ${ LIGHT_EPSILON };
-										shadowRayQueue.elements[ shadowIndex ].medium = i32( ( m & 0xffffu )
-											| ( select( 0xffffu, u32( input.insideObject ) & 0xffffu, input.insideObject >= 0 ) << 16u ) );
+										shadowRayQueue.elements[ shadowIndex ].mediumStack = input.mediumStack;
 										rayDataStorage[ index ].mediumShadowIndex = i32( shadowIndex );
 										// the light reaching a scatter is direct at the depth of the scatter
 										rayDataStorage[ index ].mediumDirect = ${ clampPathContributionFunc }( direct, input.currentBounce + 1u, clampDirect, clampIndirect );
@@ -554,6 +563,7 @@ export class LogicKernel extends ComputeKernel {
 
 									mediumScatter = true;
 									mediumEnd = t;
+									rayDataStorage[ index ].mediumPhaseWeights = phaseWeights;
 									let transmittance = exp( - sigmaT * t );
 									mediumWeight = sigmaS * transmittance / max( dot( channelP, sigmaT * transmittance ), 1e-9 );
 

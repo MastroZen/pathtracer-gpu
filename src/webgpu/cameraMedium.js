@@ -1,32 +1,35 @@
 import { DoubleSide, Matrix4, Ray, Vector3 } from 'three';
+import { MEDIUM_STACK_EMPTY, MEDIUM_STACK_SIZE } from './nodes/mediumStack.wgsl.js';
 
 const _position = new Vector3();
 const _inverse = new Matrix4();
 const _ray = new Ray();
 
-// THE MEDIUM THE CAMERA STANDS IN: its index in the material table and the transform slot of its
-// object, both -1 for none. The object gives a heterogeneous density its coordinates.
+// THE MEDIA THE CAMERA STANDS IN: the stack a camera ray starts with, four words - the material in
+// the low 16 bits and the transform slot of its object in the high ones, MEDIUM_STACK_EMPTY after
+// the last. The object gives a heterogeneous density its coordinates.
 //
 // Cycles decides it per path (integrator_volume_stack_init): from the origin of the camera ray it
-// traces up the Z axis, and a medium whose boundary is first met from BEHIND contains the origin.
-// A pinhole camera has one origin for every ray, so here the same test runs once on the host, per
-// mesh: the nearest hit of its own geometry along the local up axis, and a back face of a material
-// that is only a medium means the camera is inside it. With depth of field the origins spread over
-// the lens, and a lens straddling the boundary sees one medium - the declared divergence. Like
+// traces up the Z axis, and a volume whose boundary is met from BEHIND before its front contains
+// the origin. A pinhole camera has one origin for every ray, so here the same test runs once on
+// the host, per mesh: the nearest hit of its own geometry along the local up axis, and a back face
+// of a material with a medium means the camera is inside it - which is Cycles' rule read object by
+// object. Fog boxes one inside another give one entry each. With depth of field the origins spread
+// over the lens, and a lens straddling a boundary sees one stack - the declared divergence. Like
 // Cycles, it wants closed meshes whose normals face out.
-export function cameraMediumIndex( scene, camera, bvhData ) {
+export function cameraMediumStack( scene, camera, bvhData ) {
 
-	const none = { material: - 1, object: - 1 };
+	const stack = new Array( MEDIUM_STACK_SIZE ).fill( MEDIUM_STACK_EMPTY );
 	const materialsMap = bvhData?.materialsMap;
-	if ( ! scene || ! camera || ! materialsMap ) return none;
+	if ( ! scene || ! camera || ! materialsMap ) return stack;
 	camera.getWorldPosition( _position );
 
-	let found = none;
+	let count = 0;
 	scene.traverseVisible( object => {
 
-		if ( found.material !== - 1 || ! object.isMesh || ! object.geometry?.boundsTree ) return;
+		if ( count >= MEDIUM_STACK_SIZE || ! object.isMesh || ! object.geometry?.boundsTree ) return;
 		const materials = Array.isArray( object.material ) ? object.material : [ object.material ];
-		if ( ! materials.some( m => m?.medium?.onlyVolume ) ) return;
+		if ( ! materials.some( m => m?.medium ) ) return;
 
 		_inverse.copy( object.matrixWorld ).invert();
 		_ray.origin.copy( _position ).applyMatrix4( _inverse );
@@ -35,13 +38,13 @@ export function cameraMediumIndex( scene, camera, bvhData ) {
 		if ( ! hit || hit.face.normal.dot( _ray.direction ) <= 0 ) return;
 
 		const material = Array.isArray( object.material ) ? object.material[ hit.face.materialIndex ?? 0 ] : object.material;
-		if ( material?.medium?.onlyVolume && materialsMap.has( material ) ) {
+		if ( material?.medium && materialsMap.has( material ) ) {
 
-			found = { material: materialsMap.get( material ), object: bvhData.getObjectSlot( object ) };
+			stack[ count ++ ] = ( ( materialsMap.get( material ) & 0xffff ) | ( ( bvhData.getObjectSlot( object ) & 0xffff ) << 16 ) ) >>> 0;
 
 		}
 
 	} );
-	return found;
+	return stack;
 
 }

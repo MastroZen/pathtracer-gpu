@@ -10,7 +10,7 @@ import { MegaKernelPathTracer } from './MegaKernelPathTracer.js';
 import { WaveFrontPathTracer } from './WaveFrontPathTracer.js';
 import { CubeToEquirectGenerator } from '../utils/CubeToEquirectGenerator.js';
 import { PathtracerBVHComputeData } from './nodes/PathtracerBVHComputeData.js';
-import { cameraMediumIndex } from './cameraMedium.js';
+import { cameraMediumStack } from './cameraMedium.js';
 import { AtlasDebugMaterial } from './materials/debug/AtlasDebugMaterial.js';
 import { SampleDensityMaterial } from './materials/debug/SampleDensityMaterial.js';
 import { setCommonAttributes } from '../core/utils/GeometryPreparationUtils.js';
@@ -248,12 +248,10 @@ export class WebGPUPathTracer {
 
 	}
 
-	/** The medium the camera stands in, re-read with the camera and the materials. */
+	/** The media the camera stands in, re-read with the camera and the materials. */
 	_updateCameraMedium() {
 
-		const medium = cameraMediumIndex( this.scene, this.camera, this._bvhData );
-		this._pathTracer.cameraMedium = medium.material;
-		this._pathTracer.cameraMediumObject = medium.object;
+		this._pathTracer.cameraMediumStack = cameraMediumStack( this.scene, this.camera, this._bvhData );
 
 	}
 

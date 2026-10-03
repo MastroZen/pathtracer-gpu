@@ -86,9 +86,9 @@ export const rayDataStruct = new StructTypeNode( {
 	// first dispersive interaction
 	dispersionWavelength: 'float',
 
-	// Subsurface: the material the path is currently travelling INSIDE, or -1 outside.
-	// The medium is otherwise only implied — the transmission attenuation infers it from the
-	// side of the exit hit — and a walk through the volume needs to know it before the exit.
+	// Subsurface: the material whose volume the path is WALKING, or -1 outside. Only the walk:
+	// the participating media a path is inside of are the stack below, and a walk through a skin
+	// inside a fog is in both
 	insideMaterial: 'int',
 
 	// Subsurface: how many steps the walk inside the volume has taken. A walk step is
@@ -113,15 +113,19 @@ export const rayDataStruct = new StructTypeNode( {
 	// of Cycles, which is a budget apart from the surface bounces
 	volumeBounce: 'uint',
 
-	// the transform slot of the object whose medium the path is in, or -1: the Object and
-	// Generated coordinates of a heterogeneous density are that object's
-	insideObject: 'int',
 
 	// THE DIRECT LIGHT OF A MEDIUM SEGMENT, kept apart from the scatter as Cycles keeps it: the
 	// shadow ray LogicKernel queued from a point of the segment, or -1, and what it brings when
 	// nothing occludes it. A second channel beside the vertex NEE, resolved the next frame
 	mediumShadowIndex: 'int',
 	mediumDirect: 'vec3f',
+
+	// THE MEDIUM STACK (nodes/mediumStack.wgsl.js): the media the path is inside of, one word an
+	// entry - the material and the object slot, whose coordinates a heterogeneous density uses
+	mediumStack: 'vec4u',
+	// the weights of the entries' phases at the last scatter point, which MaterialKernel samples
+	// the mixture with: LogicKernel or VolumeKernel writes them where the scatter happens
+	mediumPhaseWeights: 'vec4f',
 
 }, 'RayData' );
 
@@ -137,11 +141,10 @@ export const traceQueuedRayStruct = new StructTypeNode( {
 	seed: 'uint',
 	alphaDepth: 'uint',
 	maxDist: 'float',
-	// a SHADOW ray starts inside this medium, or -1: the material index in the low 16 bits and
-	// the object slot in the high ones (0xffff for unknown), so a heterogeneous density finds its
-	// coordinates. The shadow kernel attenuates the ray until it crosses that medium's boundary.
-	// Bounce rays leave it unread
-	medium: 'int',
+	// the MEDIUM STACK a shadow ray starts with, a copy of its path's (Cycles copies it into the
+	// shadow state): the shadow kernel updates it at every boundary it crosses. Bounce rays leave
+	// it unread
+	mediumStack: 'vec4u',
 
 }, 'TraceQueuedRay' );
 

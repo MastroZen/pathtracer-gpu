@@ -23,11 +23,10 @@ export class PathTracerBackend {
 		this.maxSubsurfaceSteps = SUBSURFACE_MAX_STEPS;
 
 		// Blender's Volume Bounces, zero by default as there: one scatter inside a medium,
-		// lit by the direct light. And the medium the camera stands in, set by the tracer
-		// from the camera position (cameraMedium.js), -1 for none
+		// lit by the direct light. And the stack of the media the camera stands in, set by the
+		// tracer from the camera position (cameraMedium.js), four empty words for none
 		this.maxVolumeBounces = 0;
-		this.cameraMedium = - 1;
-		this.cameraMediumObject = - 1;
+		this.cameraMediumStack = [ 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff ];
 
 		// ── LA PELURIA ──
 		//

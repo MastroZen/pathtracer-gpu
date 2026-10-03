@@ -1,12 +1,16 @@
 import { StorageBufferAttribute } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
-import { storage, globalId, uniform, wgslFn } from 'three/tsl';
+import { storage, globalId, uniform } from 'three/tsl';
 import { proxy, proxyFn, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit } from '../../nodes/random.wgsl.js';
 import { rayQueueStruct, intersectionResultStruct } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
-import { mediumDensityFunc, mediumMajorantFunc, mediumPointFunc, mediumRatioTrackingFunc } from '../../nodes/medium.wgsl.js';
+import { mediumPointFunc } from '../../nodes/medium.wgsl.js';
+import {
+	mediumStackCoefficientsFunc, mediumStackEnterFn, mediumStackExitFn, mediumStackMajorantFunc, mediumStackPointFunc,
+	mediumStackTransmittanceFunc,
+} from '../../nodes/mediumStack.wgsl.js';
 
 // How many null boundaries of participating media a shadow ray crosses before it gives up and
 // counts as unoccluded with the transmittance gathered so far: entering and leaving a fog box is
@@ -49,18 +53,21 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		// already bound by the raycast, which reads them for the alpha test: no new binding
 		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
 		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
-		// without a heterogeneous medium in the scene the ratio tracking is a stub of the same
-		// signature, and the interpreter stays out of this kernel
-		let ratioTrackingFn = wgslFn( /* wgsl */ `
-			fn mediumRatioTracking( material: u32, objectSlot: u32, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> vec3f {
-				return vec3f( 1.0 );
+		// the transmittance of a stretch through the stack: without a heterogeneous medium in the
+		// scene only the closed form, and the interpreter stays out of this kernel
+		const coefficientsFn = mediumStackCoefficientsFunc( materialsBuffer );
+		let transmittanceFn = wgslTagFn/* wgsl */`
+			fn mediumStackTransmittance( stack: vec4u, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> vec3f {
+				if ( stack.x == 0xffffffffu ) { return vec3f( 1.0 ); }
+				return exp( - ${ coefficientsFn }( stack )[ 1 ] * len );
 			}
-		` );
+		`;
 		if ( registers > 0 ) {
 
 			const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
-			const densityFn = mediumDensityFunc( mediumPointFunc( materialsBuffer, transformsBuffer, svmRunFn, registers ) );
-			ratioTrackingFn = mediumRatioTrackingFunc( materialsBuffer, densityFn, mediumMajorantFunc( densityFn, materialsBuffer ) );
+			const pointFn = mediumPointFunc( materialsBuffer, transformsBuffer, svmRunFn, registers );
+			transmittanceFn = mediumStackTransmittanceFunc( materialsBuffer, coefficientsFn,
+				mediumStackPointFunc( materialsBuffer, pointFn ), mediumStackMajorantFunc( materialsBuffer ) );
 
 		}
 
@@ -97,7 +104,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 				let direction = queuedRay.direction;
 				let bounded = queuedRay.maxDist > 0.0;
 				var remaining = queuedRay.maxDist;
-				var medium = queuedRay.medium;
+				var stack = queuedRay.mediumStack;
 				var transmittance = vec3f( 1.0 );
 				var occluder = - 1;
 				var occluderDist = 0.0;
@@ -124,27 +131,12 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 					}
 
-					// the stretch up to the next boundary, or to the light: in closed form through a
-					// homogeneous medium, by ratio tracking through a heterogeneous one
-					if ( medium != - 1 ) {
+					// the stretch up to the next boundary, or to the light, through every medium of
+					// the stack: in closed form when they are all homogeneous, by ratio tracking when not
+					if ( stack.x != 0xffffffffu ) {
 
-						let m = u32( medium ) & 0xffffu;
-						let mediumObject = ( u32( medium ) >> 16u ) & 0xffffu;
 						let stretch = select( select( 1e30, remaining, bounded ), hitResult.dist, hitTriangle );
-						if ( ( ${ materialsBuffer }[ m ].mediumFlags & 4u ) != 0u ) {
-
-							transmittance *= ${ ratioTrackingFn }( m, mediumObject, origin, direction, stretch, &rng );
-
-						} else {
-
-							let sigmaT = vec3f(
-								${ materialsBuffer }[ m ].mediumScatterR + ${ materialsBuffer }[ m ].mediumAbsorptionR,
-								${ materialsBuffer }[ m ].mediumScatterG + ${ materialsBuffer }[ m ].mediumAbsorptionG,
-								${ materialsBuffer }[ m ].mediumScatterB + ${ materialsBuffer }[ m ].mediumAbsorptionB,
-							);
-							transmittance *= exp( - sigmaT * stretch );
-
-						}
+						transmittance *= ${ transmittanceFn }( stack, origin, direction, stretch, &rng );
 
 					}
 
@@ -159,14 +151,15 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 					}
 
-					// a null boundary: entering from the front, leaving from the back
+					// a null boundary: its medium enters the stack from the front, leaves it from the back
+					let word = ( materialIndex & 0xffffu ) | ( ( u32( hitResult.objectIndex ) & 0xffffu ) << 16u );
 					if ( hitResult.side > 0.0 ) {
 
-						medium = i32( ( materialIndex & 0xffffu ) | ( ( u32( hitResult.objectIndex ) & 0xffffu ) << 16u ) );
+						stack = ${ mediumStackEnterFn }( stack, word );
 
-					} else if ( medium != - 1 && ( u32( medium ) & 0xffffu ) == materialIndex ) {
+					} else {
 
-						medium = - 1;
+						stack = ${ mediumStackExitFn }( stack, word );
 
 					}
 

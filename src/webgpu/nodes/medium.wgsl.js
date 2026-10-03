@@ -10,12 +10,9 @@ import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 // medium whose majorant is far below its density
 export const MEDIUM_MAX_STEPS = 256;
 
-// The density majorant of a segment, the way Cycles estimates one when nothing bounds the shader
-// (volume_estimate_extrema: four stratified points). Weighted tracking stays unbiased with a
-// majorant that is too low - it pays in noise - so the estimate gets a margin, and a FLOOR, since
-// four points can miss a thin wisp entirely and a majorant of zero would never look again.
-export const MEDIUM_MAJORANT_SAMPLES = 4;
-export const MEDIUM_MAJORANT_MARGIN = 1.5;
+// The density bound of a heterogeneous medium whose record carries none: weighted tracking stays
+// unbiased with a majorant that is too low - it pays in noise - and the app measures one on a grid
+// whenever a program drives the density (densityBound), so this is a floor and not an estimate.
 export const MEDIUM_MAJORANT_FLOOR = 0.25;
 
 // A generator of its own: a walk draws a variable number of values, and the reserved dimensions
@@ -137,78 +134,3 @@ export const mediumPointFunc = ( materials, transforms, svmRun, registers ) => w
 	}
 
 `;
-
-// The density alone, for the majorant and the shadow rays: the same run, its last channel. It takes
-// the point function instead of building one, since a kernel that wants both would otherwise
-// declare mediumPoint twice
-export const mediumDensityFunc = ( pointFn ) => wgslTagFn/* wgsl */`
-
-	fn mediumDensity( material: u32, objectSlot: u32, point: vec3f ) -> f32 {
-
-		return ${ pointFn }( material, objectSlot, point ).w;
-
-	}
-
-`;
-
-// The majorant of the density along a segment: the largest of four stratified samples, with the
-// margin and the floor above
-export const mediumMajorantFunc = ( densityFn, materials ) => wgslTagFn/* wgsl */`
-
-	fn mediumMajorant( material: u32, objectSlot: u32, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> f32 {
-
-		// the bound the host measured on a grid, when there is one: it does not undershoot where
-		// the grid looked, and a weight that never goes negative is a pixel that never goes black
-		let measured = ${ materials }[ material ].mediumDensityMax;
-		if ( measured > 0.0 ) { return measured; }
-
-		let offset = ${ mediumRandFn }( rng );
-		var largest = 0.0;
-		for ( var i = 0u; i < ${ MEDIUM_MAJORANT_SAMPLES }u; i ++ ) {
-
-			let t = len * ( f32( i ) + offset ) / ${ MEDIUM_MAJORANT_SAMPLES }.0;
-			largest = max( largest, ${ densityFn }( material, objectSlot, origin + direction * t ) );
-
-		}
-		return max( largest * ${ MEDIUM_MAJORANT_MARGIN }, ${ MEDIUM_MAJORANT_FLOOR } );
-
-	}
-
-`;
-
-// THE TRANSMITTANCE of a stretch by RATIO TRACKING (Cycles volume_transmittance with null
-// scattering): tentative collisions at the majorant, each multiplying by one minus the ratio of
-// the true extinction to the majorant. Per channel, with the majorant of the largest; a factor
-// may be negative when the majorant is too low, and the estimate stays unbiased.
-export const mediumRatioTrackingFunc = ( materials, densityFn, majorantFn ) => wgslTagFn/* wgsl */`
-
-	fn mediumRatioTracking( material: u32, objectSlot: u32, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> vec3f {
-
-		let unit = vec3f(
-			${ materials }[ material ].mediumScatterR + ${ materials }[ material ].mediumAbsorptionR,
-			${ materials }[ material ].mediumScatterG + ${ materials }[ material ].mediumAbsorptionG,
-			${ materials }[ material ].mediumScatterB + ${ materials }[ material ].mediumAbsorptionB,
-		);
-		let unitMax = max( unit.r, max( unit.g, unit.b ) );
-		if ( unitMax <= 0.0 ) { return vec3f( 1.0 ); }
-
-		let sigmaBar = unitMax * ${ majorantFn }( material, objectSlot, origin, direction, min( len, 1e4 ), rng );
-		var transmittance = vec3f( 1.0 );
-		var t = 0.0;
-		for ( var k = 0u; k < ${ MEDIUM_MAX_STEPS }u; k ++ ) {
-
-			t -= log( max( 1.0 - ${ mediumRandFn }( rng ), 1e-9 ) ) / sigmaBar;
-			if ( t >= len ) { break; }
-			let density = ${ densityFn }( material, objectSlot, origin + direction * t );
-			transmittance *= 1.0 - unit * density / sigmaBar;
-			if ( all( abs( transmittance ) < vec3f( 1e-5 ) ) ) { break; }
-
-		}
-		return transmittance;
-
-	}
-
-`;
-
-/** A material and an object slot in the one word a queued shadow ray carries: -1 is no medium. */
-export const MEDIUM_NO_OBJECT = 0xffff;
