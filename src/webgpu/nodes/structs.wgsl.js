@@ -293,7 +293,8 @@ export const materialStruct = new StructTypeNode( {
 	// THE PARTICIPATING MEDIUM of the Volume socket (the app's graph/medium.ts, from Cycles
 	// svm/closure.h): bit 0 makes the surface a NULL boundary that rays and shadow rays cross
 	// without bending (SD_HAS_ONLY_VOLUME), bit 1 says the record carries a medium that a path
-	// inside it integrates. Coefficients per metre, as separate floats for the reason the hair
+	// inside it integrates, bit 2 that it is HETEROGENEOUS: the coefficients are at density one,
+	// and the program below gives the density at every point. Coefficients per metre, as separate floats for the reason the hair
 	// tint gives above. One lobe: a mix of phases with different g is fused by the app.
 	mediumFlags: 'uint',
 	mediumScatterR: 'float',
@@ -306,11 +307,25 @@ export const materialStruct = new StructTypeNode( {
 	mediumEmissionR: 'float',
 	mediumEmissionG: 'float',
 	mediumEmissionB: 'float',
-	// and the padding that keeps the record on the stride of four
-	_mediumAlignment0: 'uint',
-	_mediumAlignment1: 'uint',
-	_mediumAlignment2: 'uint',
-	// total size = 328
+	// the program of a wired Density: where it starts, how long, its constants, and the
+	// register of its value - run at points inside the medium (VolumeKernel, the shadow rays)
+	mediumSvmCode: 'uint',
+	mediumSvmCount: 'uint',
+	mediumSvmConsts: 'uint',
+	mediumSvmOutput: 'uint',
+	// the texture space of the mesh, Blender's orco: Generated inside the medium is the
+	// object position minus the minimum, over the size
+	mediumSpaceMinX: 'float',
+	mediumSpaceMinY: 'float',
+	mediumSpaceMinZ: 'float',
+	mediumSpaceSizeX: 'float',
+	mediumSpaceSizeY: 'float',
+	mediumSpaceSizeZ: 'float',
+	// the bound of the density over the medium, measured on the host by running the program on a
+	// grid (the app's graph/medium.ts densityBound): the majorant of every walk. Zero is unknown -
+	// a program that reads an image - and the walk estimates one per segment
+	mediumDensityMax: 'float',
+	// total size = 336
 }, 'Material' );
 
 export const surfaceRecordStruct = new StructTypeNode( {

@@ -4,7 +4,8 @@ const _position = new Vector3();
 const _inverse = new Matrix4();
 const _ray = new Ray();
 
-// THE MEDIUM THE CAMERA STANDS IN, as an index in the material table, or -1.
+// THE MEDIUM THE CAMERA STANDS IN: its index in the material table and the transform slot of its
+// object, both -1 for none. The object gives a heterogeneous density its coordinates.
 //
 // Cycles decides it per path (integrator_volume_stack_init): from the origin of the camera ray it
 // traces up the Z axis, and a medium whose boundary is first met from BEHIND contains the origin.
@@ -13,15 +14,17 @@ const _ray = new Ray();
 // that is only a medium means the camera is inside it. With depth of field the origins spread over
 // the lens, and a lens straddling the boundary sees one medium - the declared divergence. Like
 // Cycles, it wants closed meshes whose normals face out.
-export function cameraMediumIndex( scene, camera, materialsMap ) {
+export function cameraMediumIndex( scene, camera, bvhData ) {
 
-	if ( ! scene || ! camera || ! materialsMap ) return - 1;
+	const none = { material: - 1, object: - 1 };
+	const materialsMap = bvhData?.materialsMap;
+	if ( ! scene || ! camera || ! materialsMap ) return none;
 	camera.getWorldPosition( _position );
 
-	let found = - 1;
+	let found = none;
 	scene.traverseVisible( object => {
 
-		if ( found !== - 1 || ! object.isMesh || ! object.geometry?.boundsTree ) return;
+		if ( found.material !== - 1 || ! object.isMesh || ! object.geometry?.boundsTree ) return;
 		const materials = Array.isArray( object.material ) ? object.material : [ object.material ];
 		if ( ! materials.some( m => m?.medium?.onlyVolume ) ) return;
 
@@ -32,7 +35,11 @@ export function cameraMediumIndex( scene, camera, materialsMap ) {
 		if ( ! hit || hit.face.normal.dot( _ray.direction ) <= 0 ) return;
 
 		const material = Array.isArray( object.material ) ? object.material[ hit.face.materialIndex ?? 0 ] : object.material;
-		if ( material?.medium?.onlyVolume && materialsMap.has( material ) ) found = materialsMap.get( material );
+		if ( material?.medium?.onlyVolume && materialsMap.has( material ) ) {
+
+			found = { material: materialsMap.get( material ), object: bvhData.getObjectSlot( object ) };
+
+		}
 
 	} );
 	return found;

@@ -194,14 +194,25 @@ export class LogicKernel extends ComputeKernel {
 					// segment is added either way, being an integral that does not depend on the
 					// draw. Divergences: the scatter and the direct light share one point instead of
 					// two, and there is no equiangular sampling yet (docs/mezzi.md in the app).
-					let inMedium = input.insideMaterial >= 0
-						&& ( ${ materialsBuffer }[ u32( input.insideMaterial ) ].mediumFlags & 2u ) != 0u;
+					let mediumFlags = select( 0u, ${ materialsBuffer }[ u32( max( input.insideMaterial, 0 ) ) ].mediumFlags, input.insideMaterial >= 0 );
+					// a HETEROGENEOUS medium was walked by VolumeKernel before this kernel: its
+					// weight is already in the throughput, and its answer is the scatter flag and
+					// distance in the ray data. Lights seen through it take no attenuation - the
+					// declared divergence (docs/mezzi.md in the app)
+					let heterogeneous = ( mediumFlags & 6u ) == 6u;
+					let inMedium = ( mediumFlags & 2u ) != 0u && ! heterogeneous;
 					var sigmaT = vec3f( 0.0 );
 					var channelP = vec3f( 0.0 );
 					var mediumSampled = false;
 					var mediumScatter = false;
 					var mediumEnd = surfaceDist;
 					var mediumWeight = vec3f( 1.0 );
+					if ( heterogeneous && input.mediumScatter == 1u ) {
+
+						mediumScatter = true;
+						mediumEnd = input.dist;
+
+					}
 					if ( inMedium ) {
 
 						let m = u32( input.insideMaterial );

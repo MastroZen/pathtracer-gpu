@@ -765,6 +765,7 @@ export function packSvmPrograms( entries ) {
 	const words = [];
 	const placements = [];
 	const mixPlacements = [];
+	const mediumPlacements = [];
 	const bits = new Uint32Array( 1 );
 	const float = new Float32Array( bits.buffer );
 
@@ -808,12 +809,16 @@ export function packSvmPrograms( entries ) {
 
 		placements.push( place( entry?.program, entry?.textureRef ) );
 		mixPlacements.push( place( entry?.mixProgram, entry?.mixTextureRef ) );
+		// and the density of a heterogeneous medium, run at points inside it
+		mediumPlacements.push( place( entry?.mediumProgram, entry?.mediumTextureRef ) );
 
 	}
 
-	// the widest program, which sizes the register file of the kernel that runs them
-	const registers = Math.max( 0, ...entries.flatMap( entry => [ entry?.program?.registers ?? 0, entry?.mixProgram?.registers ?? 0 ] ) );
-	return { words: Uint32Array.from( words ), placements, mixPlacements, registers };
+	// the widest program, which sizes the register file of the kernels that run them
+	const registers = Math.max( 0, ...entries.flatMap( entry => [
+		entry?.program?.registers ?? 0, entry?.mixProgram?.registers ?? 0, entry?.mediumProgram?.registers ?? 0,
+	] ) );
+	return { words: Uint32Array.from( words ), placements, mixPlacements, mediumPlacements, registers };
 
 }
 

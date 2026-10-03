@@ -1,11 +1,12 @@
 import { StorageBufferAttribute } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
-import { storage, globalId, uniform } from 'three/tsl';
-import { proxy, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { storage, globalId, uniform, wgslFn } from 'three/tsl';
+import { proxy, proxyFn, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit } from '../../nodes/random.wgsl.js';
 import { rayQueueStruct, intersectionResultStruct } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
+import { mediumDensityFunc, mediumMajorantFunc, mediumRatioTrackingFunc } from '../../nodes/medium.wgsl.js';
 
 // How many null boundaries of participating media a shadow ray crosses before it gives up and
 // counts as unoccluded with the transmittance gathered so far: entering and leaving a fog box is
@@ -22,7 +23,10 @@ const MEDIUM_SHADOW_STEPS = 16;
 // hit distance against the light distance.
 export class TraceShadowRayKernel extends ComputeKernel {
 
-	constructor( ) {
+	// "registers" is the register file of the density programs of the scene, and zero when it has
+	// no heterogeneous medium: then the interpreter is not compiled in at all, since every scene
+	// would pay its compile time for a feature it does not use
+	constructor( registers = 0 ) {
 
 		const params = {
 			bvhData: { value: null },
@@ -45,6 +49,20 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		// already bound by the raycast, which reads them for the alpha test: no new binding
 		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
 		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
+		// without a heterogeneous medium in the scene the ratio tracking is a stub of the same
+		// signature, and the interpreter stays out of this kernel
+		let ratioTrackingFn = wgslFn( /* wgsl */ `
+			fn mediumRatioTracking( material: u32, objectSlot: u32, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> vec3f {
+				return vec3f( 1.0 );
+			}
+		` );
+		if ( registers > 0 ) {
+
+			const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
+			const densityFn = mediumDensityFunc( materialsBuffer, transformsBuffer, svmRunFn, registers );
+			ratioTrackingFn = mediumRatioTrackingFunc( materialsBuffer, densityFn, mediumMajorantFunc( densityFn, materialsBuffer ) );
+
+		}
 
 		const fn = wgslTagFn /* wgsl */`
 
@@ -84,6 +102,8 @@ export class TraceShadowRayKernel extends ComputeKernel {
 				var occluder = - 1;
 				var occluderDist = 0.0;
 				var travelled = 0.0;
+				var rng = queuedRay.seed * 747796405u + queuedRay.pixelIndex * 2891336453u
+					+ ( queuedRay.currentBounce * 128u + queuedRay.alphaDepth ) * 277803737u + 0x68e31da4u;
 				for ( var crossing = 0u; crossing < maxMediumCrossings; crossing ++ ) {
 
 					let ray = Ray( origin, direction, select( 0.0, remaining, bounded ) );
@@ -104,17 +124,27 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 					}
 
-					// the stretch up to the next boundary, or to the light
-					if ( medium >= 0 ) {
+					// the stretch up to the next boundary, or to the light: in closed form through a
+					// homogeneous medium, by ratio tracking through a heterogeneous one
+					if ( medium != - 1 ) {
 
-						let m = u32( medium );
-						let sigmaT = vec3f(
-							${ materialsBuffer }[ m ].mediumScatterR + ${ materialsBuffer }[ m ].mediumAbsorptionR,
-							${ materialsBuffer }[ m ].mediumScatterG + ${ materialsBuffer }[ m ].mediumAbsorptionG,
-							${ materialsBuffer }[ m ].mediumScatterB + ${ materialsBuffer }[ m ].mediumAbsorptionB,
-						);
+						let m = u32( medium ) & 0xffffu;
+						let mediumObject = ( u32( medium ) >> 16u ) & 0xffffu;
 						let stretch = select( select( 1e30, remaining, bounded ), hitResult.dist, hitTriangle );
-						transmittance *= exp( - sigmaT * stretch );
+						if ( ( ${ materialsBuffer }[ m ].mediumFlags & 4u ) != 0u ) {
+
+							transmittance *= ${ ratioTrackingFn }( m, mediumObject, origin, direction, stretch, &rng );
+
+						} else {
+
+							let sigmaT = vec3f(
+								${ materialsBuffer }[ m ].mediumScatterR + ${ materialsBuffer }[ m ].mediumAbsorptionR,
+								${ materialsBuffer }[ m ].mediumScatterG + ${ materialsBuffer }[ m ].mediumAbsorptionG,
+								${ materialsBuffer }[ m ].mediumScatterB + ${ materialsBuffer }[ m ].mediumAbsorptionB,
+							);
+							transmittance *= exp( - sigmaT * stretch );
+
+						}
 
 					}
 
@@ -132,9 +162,9 @@ export class TraceShadowRayKernel extends ComputeKernel {
 					// a null boundary: entering from the front, leaving from the back
 					if ( hitResult.side > 0.0 ) {
 
-						medium = i32( materialIndex );
+						medium = i32( ( materialIndex & 0xffffu ) | ( ( u32( hitResult.objectIndex ) & 0xffffu ) << 16u ) );
 
-					} else if ( i32( materialIndex ) == medium ) {
+					} else if ( medium != - 1 && ( u32( medium ) & 0xffffu ) == materialIndex ) {
 
 						medium = - 1;
 
@@ -155,6 +185,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 		super( fn( params ) );
 
+		this.registers = registers;
 		this.defineUniformAccessors( params );
 
 	}

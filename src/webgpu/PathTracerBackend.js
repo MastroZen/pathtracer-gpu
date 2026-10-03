@@ -27,6 +27,7 @@ export class PathTracerBackend {
 		// from the camera position (cameraMedium.js), -1 for none
 		this.maxVolumeBounces = 0;
 		this.cameraMedium = - 1;
+		this.cameraMediumObject = - 1;
 
 		// ── LA PELURIA ──
 		//

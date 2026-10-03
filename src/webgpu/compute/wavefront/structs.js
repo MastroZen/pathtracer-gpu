@@ -113,6 +113,10 @@ export const rayDataStruct = new StructTypeNode( {
 	// of Cycles, which is a budget apart from the surface bounces
 	volumeBounce: 'uint',
 
+	// the transform slot of the object whose medium the path is in, or -1: the Object and
+	// Generated coordinates of a heterogeneous density are that object's
+	insideObject: 'int',
+
 }, 'RayData' );
 
 // A ray queued for BVH traversal by the trace kernels. A "maxDist" of zero traces unbounded.
@@ -127,8 +131,10 @@ export const traceQueuedRayStruct = new StructTypeNode( {
 	seed: 'uint',
 	alphaDepth: 'uint',
 	maxDist: 'float',
-	// a SHADOW ray starts inside this medium (a material index), or -1: the shadow kernel
-	// attenuates it until it crosses that medium's boundary. Bounce rays leave it unread
+	// a SHADOW ray starts inside this medium, or -1: the material index in the low 16 bits and
+	// the object slot in the high ones (0xffff for unknown), so a heterogeneous density finds its
+	// coordinates. The shadow kernel attenuates the ray until it crosses that medium's boundary.
+	// Bounce rays leave it unread
 	medium: 'int',
 
 }, 'TraceQueuedRay' );

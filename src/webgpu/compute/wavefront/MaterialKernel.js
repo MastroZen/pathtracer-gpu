@@ -47,6 +47,7 @@ export class MaterialKernel extends ComputeKernel {
 			// the material of the medium the camera stands in, or -1: decided on the host from
 			// the camera position (WaveFrontPathTracer), the volume stack init of Cycles
 			cameraMedium: uniform( - 1, 'int' ),
+			cameraMediumObject: uniform( - 1, 'int' ),
 
 			sampleCountTarget: textureStore( new StorageTexture( 1, 1 ) ).toReadWrite(),
 
@@ -105,6 +106,7 @@ export class MaterialKernel extends ComputeKernel {
 				maxSubsurfaceSteps: u32,
 				maxVolumeBounces: u32,
 				cameraMedium: i32,
+				cameraMediumObject: i32,
 				misEnabled: u32,
 				pixelFilterOn: u32,
 
@@ -223,6 +225,7 @@ export class MaterialKernel extends ComputeKernel {
 					// a camera ray starts in the medium the camera stands in, which is no medium at all
 					// for a camera in the open
 					rayDataStorage[ index ].insideMaterial = cameraMedium;
+					rayDataStorage[ index ].insideObject = cameraMediumObject;
 					rayDataStorage[ index ].subsurfaceSteps = 0u;
 					rayDataStorage[ index ].mediumScatter = 0u;
 					rayDataStorage[ index ].volumeBounce = 0u;
@@ -243,6 +246,9 @@ export class MaterialKernel extends ComputeKernel {
 					let inMediumPath = input.insideMaterial >= 0
 						&& ( ${ materialsBuffer }[ u32( input.insideMaterial ) ].mediumFlags & 2u ) != 0u;
 					let inSubsurface = input.insideMaterial >= 0 && ! inMediumPath;
+					// the medium as a shadow ray carries it: material and object slot in one word
+					let mediumWord = select( - 1, i32( ( u32( input.insideMaterial ) & 0xffffu )
+						| ( select( 0xffffu, u32( input.insideObject ) & 0xffffu, input.insideObject >= 0 ) << 16u ) ), inMediumPath );
 
 					// -- A SCATTER INSIDE THE MEDIUM, at the point LogicKernel chose --
 					//
@@ -310,7 +316,7 @@ export class MaterialKernel extends ComputeKernel {
 							shadowRayQueue.elements[ shadowIndex ].seed = input.seed;
 							shadowRayQueue.elements[ shadowIndex ].alphaDepth = input.alphaDepth;
 							shadowRayQueue.elements[ shadowIndex ].maxDist = input.lightDist - ${ LIGHT_EPSILON };
-							shadowRayQueue.elements[ shadowIndex ].medium = input.insideMaterial;
+							shadowRayQueue.elements[ shadowIndex ].medium = mediumWord;
 							rayDataStorage[ index ].shadowRayIntersectionIndex = i32( shadowIndex );
 
 						} else {
@@ -495,13 +501,16 @@ export class MaterialKernel extends ComputeKernel {
 						}
 
 						var insideNext = input.insideMaterial;
+						var insideObjectNext = input.insideObject;
 						if ( input.side > 0.0 ) {
 
 							insideNext = i32( objectInfo.materialIndex );
+							insideObjectNext = input.objectIndex;
 
 						} else if ( input.insideMaterial == i32( objectInfo.materialIndex ) ) {
 
 							insideNext = - 1;
+							insideObjectNext = - 1;
 
 						}
 
@@ -524,6 +533,7 @@ export class MaterialKernel extends ComputeKernel {
 						rayDataStorage[ index ].rayIntersectionIndex = i32( crossIndex );
 						rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
 						rayDataStorage[ index ].insideMaterial = insideNext;
+						rayDataStorage[ index ].insideObject = insideObjectNext;
 						return;
 
 					}
@@ -1072,7 +1082,7 @@ export class MaterialKernel extends ComputeKernel {
 							shadowRayQueue.elements[ shadowIndex ].alphaDepth = input.alphaDepth;
 							shadowRayQueue.elements[ shadowIndex ].maxDist = input.lightDist - ${ LIGHT_EPSILON };
 							// a surface inside a medium sends its shadow ray from inside it
-							shadowRayQueue.elements[ shadowIndex ].medium = select( - 1, input.insideMaterial, inMediumPath );
+							shadowRayQueue.elements[ shadowIndex ].medium = mediumWord;
 							rayDataStorage[ index ].shadowRayIntersectionIndex = i32( shadowIndex );
 
 						} else {

@@ -6,6 +6,7 @@ import { SvmKernel, svmResultsTexture, svmResultsCapacity } from './compute/wave
 import { SVM_REGISTER_BUCKETS, svmRegisterBucket } from './nodes/svm.wgsl.js';
 import { TraceRayKernel } from './compute/wavefront/TraceRayKernel.js';
 import { TraceShadowRayKernel } from './compute/wavefront/TraceShadowRayKernel.js';
+import { VolumeKernel } from './compute/wavefront/VolumeKernel.js';
 import { QueueLengthToDispatchKernel } from './compute/wavefront/QueueLengthToDispatchKernel.js';
 import { ZeroOutBufferKernel } from './compute/ZeroOutBufferKernel.js';
 import { EquirectHdrInfoNode } from './EquirectHdrInfoNode.js';
@@ -98,7 +99,8 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		// clear kernels
 		this.zeroDispatchKernel = new ZeroOutBufferKernel().setWorkgroupSize( 1, 1, 1 );
 
-		// later
+		// the segments through a HETEROGENEOUS medium, built the first time a scene has one and
+		// rebuilt with the register file its density programs need
 		this.volumeKernel = null;
 
 	}
@@ -133,6 +135,13 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		// the medium a path travels in is read from the material records
 		this.logicKernel.bvhData = bvhData;
 		this.logicKernel.needsUpdate = true;
+
+		if ( this.volumeKernel ) {
+
+			this.volumeKernel.bvhData = bvhData;
+			this.volumeKernel.needsUpdate = true;
+
+		}
 
 		this.reset();
 
@@ -311,6 +320,43 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
+	// the register file of the density programs, or zero for a scene without a heterogeneous medium
+	_mediumRegisters() {
+
+		const bvhData = this.materialKernel.bvhData;
+		return ( bvhData?.svmMediums ?? 0 ) > 0 ? svmRegisterBucket( Math.max( 1, bvhData.svmRegisters ) ) : 0;
+
+	}
+
+	// the shadow kernel with the interpreter of the density programs, or without it: a scene that
+	// has no heterogeneous medium does not pay its compile time
+	_updateShadowKernel() {
+
+		const registers = this._mediumRegisters();
+		if ( this.traceShadowRayKernel.registers !== registers ) {
+
+			const kernel = new TraceShadowRayKernel( registers ).setWorkgroupSize( 64, 1, 1 );
+			kernel.context.random = this.traceShadowRayKernel.context.random;
+			kernel.bvhData = this.materialKernel.bvhData;
+			this.traceShadowRayKernel = kernel;
+
+		}
+		return this.traceShadowRayKernel;
+
+	}
+
+	_updateVolumeKernel( registers ) {
+
+		if ( ! this.volumeKernel || this.volumeKernel.registers !== registers ) {
+
+			this.volumeKernel = new VolumeKernel( registers ).setWorkgroupSize( 64, 1, 1 );
+			this.volumeKernel.bvhData = this.materialKernel.bvhData;
+
+		}
+		return this.volumeKernel;
+
+	}
+
 	_updateSvmKernel( registers, rayCount ) {
 
 		if ( this.svmKernel.registers !== registers ) {
@@ -375,7 +421,6 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 			logicKernel,
 			materialKernel,
 			traceRayKernel,
-			traceShadowRayKernel,
 			rayDispatchConverter,
 			shadowDispatchConverter,
 			zeroDispatchKernel,
@@ -429,6 +474,21 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				logicKernel.outputTarget = this.outputTarget;
 				logicKernel.sampleCountTarget = this.sampleCountTarget;
 
+				// Step 0: walk the segments that crossed a heterogeneous medium, before LogicKernel reads
+				// their answer. A scene without one does not dispatch it
+				const mediumRegisters = this._mediumRegisters();
+				if ( mediumRegisters > 0 ) {
+
+					const volumeKernel = this._updateVolumeKernel( mediumRegisters );
+					volumeKernel.rayDataStorage = rayDataStorage;
+					volumeKernel.rayIntersectionsStorage = rayIntersectionsStorage;
+					volumeKernel.rayCount = rayCount;
+					volumeKernel.clampDirect = logicKernel.clampDirect;
+					volumeKernel.clampIndirect = logicKernel.clampIndirect;
+					renderer.compute( volumeKernel.kernel, volumeKernel.getDispatchSize( rayCount, 1, 1 ) );
+
+				}
+
 				// Step 1: resolve last frame's trace results — accumulate NEE / emission / env, terminate
 				// finished paths into the output, and pick the next NEE light for each live path
 				logicKernel.rayDataStorage = rayDataStorage;
@@ -472,6 +532,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				materialKernel.maxSubsurfaceSteps = this.maxSubsurfaceSteps;
 				materialKernel.maxVolumeBounces = this.maxVolumeBounces;
 				materialKernel.cameraMedium = this.cameraMedium;
+				materialKernel.cameraMediumObject = this.cameraMediumObject;
 				materialKernel.targetDimensions.copy( targetDimensions );
 				renderer.compute( materialKernel.kernel, materialKernel.getDispatchSize( rayCount, 1, 1 ) );
 
@@ -487,6 +548,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				shadowDispatchConverter.queue = shadowRayQueue;
 				renderer.compute( shadowDispatchConverter.kernel, [ 1, 1, 1 ] );
 
+				const traceShadowRayKernel = this._updateShadowKernel();
 				traceShadowRayKernel.shadowRayQueue = shadowRayQueue;
 				traceShadowRayKernel.shadowRayIntersectionsStorage = shadowRayIntersectionsStorage;
 				traceShadowRayKernel.hairData = this.hairAttribute;

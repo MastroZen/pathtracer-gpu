@@ -81,6 +81,8 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// resolves: at zero the tracer does not dispatch it
 		this.svmRegisters = 0;
 		this.svmResolved = 0;
+		// how many materials are a HETEROGENEOUS medium: zero, and VolumeKernel is not dispatched
+		this.svmMediums = 0;
 
 	}
 
@@ -588,7 +590,8 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.updateMaterialsMap();
 
 		const { materials, storage, structs, bvh } = this;
-		const { materialData, textures, svmWords, svmRegisters, svmResolved } = this.writeMaterialsBuffer( materials );
+		const { materialData, textures, svmWords, svmRegisters, svmResolved, svmMediums } = this.writeMaterialsBuffer( materials );
+		this.svmMediums = svmMediums;
 		this.svmRegisters = svmRegisters;
 		this.svmResolved = svmResolved;
 
@@ -743,11 +746,14 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			const usable = ( program, images ) => program && images.every( t => t && t.isTexture );
 			const images = m.svmImages ?? [];
 			const mixImages = m.svmMixImages ?? [];
+			const mediumImages = m.svmMediumImages ?? [];
 			return {
 				program: usable( m.svmProgram, images ) ? m.svmProgram : null,
 				textureRef: slot => textureWord( images[ slot ] ),
 				mixProgram: usable( m.svmMixProgram, mixImages ) ? m.svmMixProgram : null,
 				mixTextureRef: slot => textureWord( mixImages[ slot ] ),
+				mediumProgram: usable( m.svmMediumProgram, mediumImages ) ? m.svmMediumProgram : null,
+				mediumTextureRef: slot => textureWord( mediumImages[ slot ] ),
 			};
 
 		} ) );
@@ -770,6 +776,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// in poi si conta.
 		const recordLength = this.structs.material.getLength();
 		let svmResolved = 0;
+		let svmMediums = 0;
 
 		// TODO: make features work
 		// features.reset();
@@ -1150,18 +1157,25 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// an emission leaf: the program's colour is light (see structs.wgsl.js)
 			intArray[ index ++ ] = m.svmEmission && svmPlace ? 1 : 0;
 
-			// the participating medium (see structs.wgsl.js): no "medium" is no medium
+			// the participating medium (see structs.wgsl.js): no "medium" is no medium. It is
+			// heterogeneous only when its density program made it into the words: a program whose
+			// image is missing does not run, and the medium falls back to the density one
 			const medium = m.medium ?? null;
-			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 : 0;
+			const mediumPlace = svm.mediumPlacements[ i ];
+			if ( medium && mediumPlace ) svmMediums ++;
+			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 | ( mediumPlace ? 4 : 0 ) : 0;
 			for ( const v of medium ? medium.scatter : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			for ( const v of medium ? medium.absorption : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			floatArray[ index ++ ] = medium ? medium.anisotropy : 0.0;
 			for ( const v of medium ? medium.emission : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
-
-			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
-			intArray[ index ++ ] = 0;
-			intArray[ index ++ ] = 0;
-			intArray[ index ++ ] = 0;
+			intArray[ index ++ ] = mediumPlace ? mediumPlace.codeWord : 0;
+			intArray[ index ++ ] = mediumPlace ? mediumPlace.count : 0;
+			intArray[ index ++ ] = mediumPlace ? mediumPlace.constWord : 0;
+			intArray[ index ++ ] = mediumPlace ? svmReg( m.svmMediumProgram.outputs[ 0 ] ) : 255;
+			const space = medium?.textureSpace ?? { min: [ - 0.5, - 0.5, - 0.5 ], size: [ 1, 1, 1 ] };
+			for ( const v of space.min ) floatArray[ index ++ ] = v;
+			for ( const v of space.size ) floatArray[ index ++ ] = v;
+			floatArray[ index ++ ] = medium?.densityMax ?? 0.0;
 
 			if ( index - recordStart !== recordLength ) {
 
@@ -1175,7 +1189,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		}
 
-		return { materialData: intArray, textures, svmWords: svm.words, svmRegisters: svm.registers, svmResolved };
+		return { materialData: intArray, textures, svmWords: svm.words, svmRegisters: svm.registers, svmResolved, svmMediums };
 
 	}
 

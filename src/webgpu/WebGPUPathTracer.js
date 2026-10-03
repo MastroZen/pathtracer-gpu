@@ -251,7 +251,9 @@ export class WebGPUPathTracer {
 	/** The medium the camera stands in, re-read with the camera and the materials. */
 	_updateCameraMedium() {
 
-		this._pathTracer.cameraMedium = cameraMediumIndex( this.scene, this.camera, this._bvhData?.materialsMap );
+		const medium = cameraMediumIndex( this.scene, this.camera, this._bvhData );
+		this._pathTracer.cameraMedium = medium.material;
+		this._pathTracer.cameraMediumObject = medium.object;
 
 	}
 
