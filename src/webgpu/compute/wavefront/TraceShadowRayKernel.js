@@ -65,7 +65,8 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		if ( registers > 0 ) {
 
 			const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
-			const pointFn = mediumPointFunc( materialsBuffer, transformsBuffer, svmRunFn, registers );
+			const gridFn = proxyFn( 'bvhData.value.fns.mediumGrid', params );
+			const pointFn = mediumPointFunc( materialsBuffer, transformsBuffer, svmRunFn, registers, gridFn );
 			transmittanceFn = mediumStackTransmittanceFunc( materialsBuffer, coefficientsFn,
 				mediumStackPointFunc( materialsBuffer, pointFn ), mediumStackMajorantFunc( materialsBuffer ) );
 

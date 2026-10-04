@@ -340,9 +340,16 @@ export const materialStruct = new StructTypeNode( {
 	mediumBlackbodyTintR: 'float',
 	mediumBlackbodyTintG: 'float',
 	mediumBlackbodyTintB: 'float',
+	// THE GRID of a fluid domain (the app's fluid/renderGrids.ts): its resolution, and where its density
+	// and temperature channels start in the program words; 0xffffffff is no channel. Three uints and not
+	// a vec3u, whose alignment would open a hole the writer does not see
+	mediumGridResX: 'uint',
+	mediumGridResY: 'uint',
+	mediumGridResZ: 'uint',
+	mediumGridDensity: 'uint',
+	mediumGridTemperature: 'uint',
 	// and the padding that keeps the record on the stride of four
 	_mediumAlignment0: 'uint',
-	_mediumAlignment1: 'uint',
 	// total size = 348
 }, 'Material' );
 

@@ -9,6 +9,7 @@ import { getSurfaceRecordFunc } from './material.wgsl.js';
 import { AtlasTexture } from '../AtlasTexture.js';
 import { materialSideValue } from '../emitters.js';
 import { packSvmPrograms, svmRunFn, SVM_REGISTER_BUCKETS } from './svm.wgsl.js';
+import { mediumGridFunc } from './medium.wgsl.js';
 import { RNG_INDEX_MIX_SHADER_COUNT } from './random.wgsl.js';
 
 // ── THE WORDS OF THE NODE MACHINE live in a TEXTURE ──
@@ -255,6 +256,8 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			}
 		`;
+		// the grids of the fluid domains live in the same words, after the programs
+		fns.mediumGrid = mediumGridFunc( svmWord );
 		// one interpreter per register file: SvmKernel includes the one its scene needs
 		for ( const registers of SVM_REGISTER_BUCKETS ) {
 
@@ -777,6 +780,19 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		const recordLength = this.structs.material.getLength();
 		let svmResolved = 0;
 		let svmMediums = 0;
+		// THE GRIDS of the fluid domains, appended to the program words as a float's bits: the material
+		// kernel binds the eight storage buffers a device guarantees, and the words are a texture
+		const gridChunks = [];
+		let gridLength = 0;
+		const gridChannel = values => {
+
+			if ( ! values ) return 0xffffffff;
+			const offset = svm.words.length + gridLength;
+			gridChunks.push( new Uint32Array( values.buffer, values.byteOffset, values.length ) );
+			gridLength += values.length;
+			return offset;
+
+		};
 
 		// TODO: make features work
 		// features.reset();
@@ -1162,10 +1178,12 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// image is missing does not run, and the medium falls back to the density one
 			const medium = m.medium ?? null;
 			const mediumPlace = svm.mediumPlacements[ i ];
-			if ( medium && mediumPlace ) svmMediums ++;
+			// a domain's grid makes the medium heterogeneous too, with or without a program
+			const grid = medium?.grid ?? null;
+			if ( medium && ( mediumPlace || grid ) ) svmMediums ++;
 			// bits 3 and 4: the material's Volume Sampling - Distance, or Equiangular alone; neither is
 			// Multiple Importance, the default
-			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 | ( mediumPlace ? 4 : 0 )
+			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 | ( mediumPlace || grid ? 4 : 0 )
 				| ( medium.sampling === 'distance' ? 8 : 0 ) | ( medium.sampling === 'equiangular' ? 16 : 0 ) : 0;
 			for ( const v of medium ? medium.scatter : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			for ( const v of medium ? medium.absorption : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
@@ -1183,15 +1201,18 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			for ( const v of space.size ) floatArray[ index ++ ] = v;
 			floatArray[ index ++ ] = medium?.densityMax ?? 0.0;
 			intArray[ index ++ ] = mediumReg( 4 );
-			const parts = medium?.wired?.parts ?? null;
+			// a grid recomputes the emission at every point as a wire does, so it brings its leaf's parts
+			const parts = medium?.wired?.parts ?? grid?.parts ?? null;
 			for ( const v of parts ? parts.color : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			floatArray[ index ++ ] = parts ? parts.strength : 0.0;
 			floatArray[ index ++ ] = parts ? parts.temperature : 0.0;
 			floatArray[ index ++ ] = parts ? parts.blackbodyIntensity : 0.0;
 			for ( const v of parts ? parts.blackbodyTint : [ 1, 1, 1 ] ) floatArray[ index ++ ] = v;
+			for ( const v of grid ? grid.res : [ 1, 1, 1 ] ) intArray[ index ++ ] = v;
+			intArray[ index ++ ] = gridChannel( grid?.density ?? null );
+			intArray[ index ++ ] = gridChannel( grid?.temperature ?? null );
 
 			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
-			intArray[ index ++ ] = 0;
 			intArray[ index ++ ] = 0;
 
 			if ( index - recordStart !== recordLength ) {
@@ -1206,7 +1227,16 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		}
 
-		return { materialData: intArray, textures, svmWords: svm.words, svmRegisters: svm.registers, svmResolved, svmMediums };
+		let svmWords = svm.words;
+		if ( gridLength ) {
+
+			svmWords = new Uint32Array( svm.words.length + gridLength );
+			svmWords.set( svm.words );
+			let at = svm.words.length;
+			for ( const chunk of gridChunks ) { svmWords.set( chunk, at ); at += chunk.length; }
+
+		}
+		return { materialData: intArray, textures, svmWords, svmRegisters: svm.registers, svmResolved, svmMediums };
 
 	}
 

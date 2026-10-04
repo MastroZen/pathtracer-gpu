@@ -78,11 +78,48 @@ export const mediumBlackbodyFn = wgslFn( /* wgsl */ `
 
 ` );
 
+// THE GRID OF A FLUID DOMAIN at a Generated point: one channel of the cache (the app's
+// fluid/renderGrids.ts), its values a float's bits in the program words after the programs, laid out
+// as Mantaflow does - x first, then y, then z - with the cells centred in the domain's box. Trilinear
+// between the eight nearest centres; constant over the last half cell; zero outside the box, where a
+// domain has no grid.
+export const mediumGridFunc = ( svmWord ) => wgslTagFn/* wgsl */`
+
+	fn mediumGrid( offset: u32, res: vec3u, g: vec3f ) -> f32 {
+
+		if ( any( g < vec3f( 0.0 ) ) || any( g > vec3f( 1.0 ) ) ) { return 0.0; }
+		let size = vec3f( res );
+		let p = clamp( g * size - vec3f( 0.5 ), vec3f( 0.0 ), size - vec3f( 1.0 ) );
+		let i0 = vec3u( floor( p ) );
+		let i1 = min( i0 + vec3u( 1u ), res - vec3u( 1u ) );
+		let f = p - floor( p );
+		let sx = res.x;
+		let sxy = res.x * res.y;
+		let v000 = bitcast<f32>( ${ svmWord }( offset + i0.x + i0.y * sx + i0.z * sxy ) );
+		let v100 = bitcast<f32>( ${ svmWord }( offset + i1.x + i0.y * sx + i0.z * sxy ) );
+		let v010 = bitcast<f32>( ${ svmWord }( offset + i0.x + i1.y * sx + i0.z * sxy ) );
+		let v110 = bitcast<f32>( ${ svmWord }( offset + i1.x + i1.y * sx + i0.z * sxy ) );
+		let v001 = bitcast<f32>( ${ svmWord }( offset + i0.x + i0.y * sx + i1.z * sxy ) );
+		let v101 = bitcast<f32>( ${ svmWord }( offset + i1.x + i0.y * sx + i1.z * sxy ) );
+		let v011 = bitcast<f32>( ${ svmWord }( offset + i0.x + i1.y * sx + i1.z * sxy ) );
+		let v111 = bitcast<f32>( ${ svmWord }( offset + i1.x + i1.y * sx + i1.z * sxy ) );
+		let near = mix( mix( v000, v100, f.x ), mix( v010, v110, f.x ), f.y );
+		let far = mix( mix( v001, v101, f.x ), mix( v011, v111, f.x ), f.y );
+		return mix( near, far, f.z );
+
+	}
+
+`;
+
 // THE MEDIUM AT A WORLD POINT: the emission in xyz and the density in w, from ONE run of the
 // program of the material with the point's Object and Generated coordinates. A pin whose register
 // is 255 keeps the value of the record - the density one, so the coefficients stand as written.
 // "objectSlot" 0xffff means unknown, and the world point is used.
-export const mediumPointFunc = ( materials, transforms, svmRun, registers ) => wgslTagFn/* wgsl */`
+//
+// A FLUID DOMAIN's grids scale two of them as Cycles does with the attributes of the Principled
+// Volume (svm_node_principled_volume): the density by the density grid, the temperature by the
+// temperature grid. 0xffffffff is no grid, and the value stands.
+export const mediumPointFunc = ( materials, transforms, svmRun, registers, gridFn ) => wgslTagFn/* wgsl */`
 
 	fn mediumPoint( material: u32, objectSlot: u32, point: vec3f ) -> vec4f {
 
@@ -109,14 +146,28 @@ export const mediumPointFunc = ( materials, transforms, svmRun, registers ) => w
 		let temperatureReg = ${ materials }[ material ].mediumSvmOutput2 & 0xffu;
 		let last = ${ registers - 1 }u;
 
-		let density = select( 1.0, max( regs[ min( densityReg, last ) ].x, 0.0 ), densityReg != 255u );
+		var density = select( 1.0, max( regs[ min( densityReg, last ) ].x, 0.0 ), densityReg != 255u );
 		let strength = select( ${ materials }[ material ].mediumEmissionStrength, regs[ min( strengthReg, last ) ].x, strengthReg != 255u );
 		let color = select(
 			vec3f( ${ materials }[ material ].mediumEmissionColorR, ${ materials }[ material ].mediumEmissionColorG, ${ materials }[ material ].mediumEmissionColorB ),
 			regs[ min( colorReg, last ) ].xyz, colorReg != 255u,
 		);
 		let blackbody = select( ${ materials }[ material ].mediumBlackbodyIntensity, regs[ min( blackbodyReg, last ) ].x, blackbodyReg != 255u );
-		let temperature = max( select( ${ materials }[ material ].mediumTemperature, regs[ min( temperatureReg, last ) ].x, temperatureReg != 255u ), 0.0 );
+		var temperature = max( select( ${ materials }[ material ].mediumTemperature, regs[ min( temperatureReg, last ) ].x, temperatureReg != 255u ), 0.0 );
+
+		let gridRes = vec3u( ${ materials }[ material ].mediumGridResX, ${ materials }[ material ].mediumGridResY, ${ materials }[ material ].mediumGridResZ );
+		let gridDensity = ${ materials }[ material ].mediumGridDensity;
+		let gridTemperature = ${ materials }[ material ].mediumGridTemperature;
+		if ( gridDensity != 0xffffffffu ) {
+
+			density *= max( ${ gridFn }( gridDensity, gridRes, generated ), 0.0 );
+
+		}
+		if ( gridTemperature != 0xffffffffu ) {
+
+			temperature *= max( ${ gridFn }( gridTemperature, gridRes, generated ), 0.0 );
+
+		}
 
 		// the emission of svm_node_principled_volume: strength times colour, plus the blackbody when
 		// its intensity is on - sigma times mix( 1, T^4, intensity ) times the colour of T, tinted

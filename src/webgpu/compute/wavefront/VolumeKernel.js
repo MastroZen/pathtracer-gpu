@@ -49,7 +49,8 @@ export class VolumeKernel extends ComputeKernel {
 		const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
 		// the density AND the emission of a point, from one run: a wired Temperature or Emission
 		// Strength is the fire, and its emission follows the field instead of filling the container
-		const pointFn = mediumPointFunc( materials, transforms, svmRunFn, registers );
+		const gridFn = proxyFn( 'bvhData.value.fns.mediumGrid', params );
+		const pointFn = mediumPointFunc( materials, transforms, svmRunFn, registers, gridFn );
 		// the path's STACK of media, summed at every point: a homogeneous entry beside a
 		// heterogeneous one is walked with it, at its constant coefficients
 		const stackFlagsFn = mediumStackFlagsFunc( materials );
