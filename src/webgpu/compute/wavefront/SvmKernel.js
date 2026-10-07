@@ -250,7 +250,7 @@ export class SvmKernel extends ComputeKernel {
 
 					if ( count > 0u ) {
 
-						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, &regs );
+						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, surfTri, select( rayDataStorage[ index ].barycoord, vec3f( 0.0 ), isCurve ), &regs );
 
 					}
 

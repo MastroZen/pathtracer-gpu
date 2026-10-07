@@ -38,7 +38,7 @@ export const SVM_OPCODES = Object.freeze( {
 	UV: 1, CONST: 2, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
-	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22,
+	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -540,6 +540,7 @@ const svmRunSource = ( registers ) => /* wgsl */ `
 fn svmRun(
 	codeWord: u32, count: u32, constWord: u32, uv: vec2f,
 	generated: mat3x3f, objectPos: mat3x3f, normal: vec3f,
+	tri: vec3u, bary: vec3f,
 	regs: ptr<function, array<vec4f, ${ registers }>>,
 ) -> u32 {
 
@@ -582,6 +583,15 @@ fn svmRun(
 					default: { r0 = vec4f( normal, 1.0 ); }
 
 				}
+
+			}
+			case ${ O.UV_MAP }u: {
+
+				// a named UV map (the UV Map node): the uv of one channel of the hit triangle with its
+				// derivatives along the default uv, moved like UV by the relief. The includer reads the
+				// channel from its vertex data (svmUvMap), so only a program that names a map pays for it
+				let frame = svmUvMap( tri, bary, u32( svmConst( c + 2u ) ) );
+				r0 = vec4f( frame[ 0 ] + frame[ 1 ] * svmConst( c ) + frame[ 2 ] * svmConst( c + 1u ), 0.0, 1.0 );
 
 			}
 			case ${ O.IMAGE }u: {
@@ -822,16 +832,20 @@ export function packSvmPrograms( entries ) {
 
 }
 
-/** The interpreter node for a register file of "registers", bound to the includer's svmSample and svmWord. */
-export function svmRunFn( sampleFn, wordFn, registers = SVM_REGISTERS ) {
+/**
+ * The interpreter node for a register file of "registers", bound to the includer's svmSample, svmWord and
+ * svmUvMap - the last returns the uv of a channel at a triangle point and its derivatives along the default
+ * uv, as the columns of a mat3x2f.
+ */
+export function svmRunFn( sampleFn, wordFn, uvMapFn, registers = SVM_REGISTERS ) {
 
 	const constFn = wgslFn( SVM_CONST_SOURCE, [ wordFn ] );
 	const regFn = wgslFn( svmRegSource( registers ), [] );
-	return wgslFn( svmRunSource( registers ), [ ...SVM_HELPER_FNS, regFn, constFn, sampleFn, wordFn ] );
+	return wgslFn( svmRunSource( registers ), [ ...SVM_HELPER_FNS, regFn, constFn, sampleFn, wordFn, uvMapFn ] );
 
 }
 
-/** Everything but svmSample and svmWord, as text: what a probe pastes before its own two. */
+/** Everything but svmSample, svmWord and svmUvMap, as text: what a probe pastes before its own three. */
 export const SVM_SOURCE = [
 	SVM_CONST_SOURCE,
 	SVM_HASH_SOURCE, SVM_SMOOTH_SOURCE, SVM_VALUE_NOISE_SOURCE, SVM_FBM_SOURCE,

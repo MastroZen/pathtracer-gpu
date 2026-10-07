@@ -256,12 +256,40 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			}
 		`;
+		// A NAMED UV MAP for the UV Map node: the channel at the hit point and its derivatives along the
+		// default uv of the triangle, the same frame the surface gives Generated - so the relief moves it as
+		// far as the default uv moved. The channel goes in bits 23-25, as getUvFromChannel reads it
+		const svmUvMap = wgslTagFn/* wgsl */`
+			fn svmUvMap( tri: vec3u, bary: vec3f, channel: u32 ) -> mat3x2f {
+
+				let a0 = ${ storage.attributes }[ tri.x ];
+				let a1 = ${ storage.attributes }[ tri.y ];
+				let a2 = ${ storage.attributes }[ tri.z ];
+				let t0 = ${ fns.getUvFromChannel }( a0, 0 );
+				let t1 = ${ fns.getUvFromChannel }( a1, 0 ) - t0;
+				let t2 = ${ fns.getUvFromChannel }( a2, 0 ) - t0;
+				let det = t1.x * t2.y - t2.x * t1.y;
+				let inv = select( 0.0, 1.0 / det, abs( det ) > 1e-20 );
+				let packed = i32( channel << 23u );
+				let k0 = ${ fns.getUvFromChannel }( a0, packed );
+				let k1 = ${ fns.getUvFromChannel }( a1, packed );
+				let k2 = ${ fns.getUvFromChannel }( a2, packed );
+				let d1 = k1 - k0;
+				let d2 = k2 - k0;
+				return mat3x2f(
+					bary.x * k0 + bary.y * k1 + bary.z * k2,
+					( d1 * t2.y - d2 * t1.y ) * inv,
+					( d2 * t1.x - d1 * t2.x ) * inv,
+				);
+
+			}
+		`;
 		// the grids of the fluid domains live in the same words, after the programs
 		fns.mediumGrid = mediumGridFunc( svmWord );
 		// one interpreter per register file: SvmKernel includes the one its scene needs
 		for ( const registers of SVM_REGISTER_BUCKETS ) {
 
-			fns[ `svmRun${ registers }` ] = svmRunFn( svmSample, svmWord, registers );
+			fns[ `svmRun${ registers }` ] = svmRunFn( svmSample, svmWord, svmUvMap, registers );
 
 		}
 

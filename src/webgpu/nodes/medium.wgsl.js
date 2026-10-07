@@ -136,7 +136,8 @@ export const mediumPointFunc = ( materials, transforms, svmRun, registers, gridF
 		var regs: array<vec4f, ${ registers }>;
 		_ = ${ svmRun }(
 			${ materials }[ material ].mediumSvmCode, ${ materials }[ material ].mediumSvmCount, ${ materials }[ material ].mediumSvmConsts,
-			vec2f( 0.0 ), mat3x3f( generated, vec3f( 0.0 ), vec3f( 0.0 ) ), mat3x3f( objectPos, vec3f( 0.0 ), vec3f( 0.0 ) ), vec3f( 0.0 ), &regs,
+			vec2f( 0.0 ), mat3x3f( generated, vec3f( 0.0 ), vec3f( 0.0 ) ), mat3x3f( objectPos, vec3f( 0.0 ), vec3f( 0.0 ) ), vec3f( 0.0 ),
+			vec3u( 0u ), vec3f( 0.0 ), &regs,
 		);
 		let packed = ${ materials }[ material ].mediumSvmOutput;
 		let densityReg = packed & 0xffu;
