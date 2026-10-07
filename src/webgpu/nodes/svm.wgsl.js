@@ -38,7 +38,7 @@ export const SVM_OPCODES = Object.freeze( {
 	UV: 1, CONST: 2, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
-	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24,
+	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24, BUMP: 25,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -739,6 +739,26 @@ fn svmRun(
 			case ${ O.COMBINE_COLOR }u: {
 
 				r0 = vec4f( select( 0.0, svmLum( a ), i0 != 255u ), select( 0.0, svmLum( b ), i1 != 255u ), select( 0.0, svmLum( f ), i2 != 255u ), 1.0 );
+
+			}
+			case ${ O.BUMP }u: {
+
+				// Blender 5.2 node_bump in tangent space: the height differences in u and v
+				// (b.x and f.x, two MATH subtractions), times 1 / (2 step), divided by the
+				// metres one UV unit covers (the u and v columns of the object frame), then
+				// N' = normalize(N - Distance * slope) mixed with N by Strength. Constants:
+				// Distance with the sign of Invert, Strength, 1 / (2 step). An unlinked
+				// Normal is the flat one, and a zero vector falls back to it as well
+				let up = vec3f( 0.0, 0.0, 1.0 );
+				let ln = length( a.xyz );
+				let n = select( up, a.xyz / max( ln, 1e-20 ), i0 != 255u && ln > 0.0 );
+				let k = svmConst( c + 2u );
+				let pu = max( length( objectPos[ 1 ] ), 1e-12 );
+				let pv = max( length( objectPos[ 2 ] ), 1e-12 );
+				let bumped = normalize( n - svmConst( c ) * vec3f( b.x * k / pu, f.x * k / pv, 0.0 ) );
+				let m = n + max( svmConst( c + 1u ), 0.0 ) * ( bumped - n );
+				let lm = length( m );
+				r0 = vec4f( select( n, m / lm, lm > 0.0 ), 1.0 );
 
 			}
 			default: {}
