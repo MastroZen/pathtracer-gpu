@@ -38,7 +38,7 @@ export const SVM_OPCODES = Object.freeze( {
 	UV: 1, CONST: 2, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
-	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23,
+	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -585,6 +585,7 @@ fn svmRun(
 				}
 
 			}
+			case ${ O.ALPHA }u: { r0 = vec4f( a.w, a.w, a.w, 1.0 ); }
 			case ${ O.UV_MAP }u: {
 
 				// a named UV map (the UV Map node): the uv of one channel of the hit triangle with its
