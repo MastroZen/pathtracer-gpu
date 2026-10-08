@@ -38,7 +38,7 @@ export const SVM_OPCODES = Object.freeze( {
 	UV: 1, CONST: 2, IMAGE: 4, MAPPING: 5, NOISE: 6, VORONOI: 7, WAVE: 8,
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
-	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24, BUMP: 25,
+	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24, BUMP: 25, DISPLACEMENT: 26,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -759,6 +759,18 @@ fn svmRun(
 				let m = n + max( svmConst( c + 1u ), 0.0 ) * ( bumped - n );
 				let lm = length( m );
 				r0 = vec4f( select( n, m / lm, lm > 0.0 ), 1.0 );
+
+			}
+			case ${ O.DISPLACEMENT }u: {
+
+				// Blender 5.2 node_displacement_object in tangent space: (height - midlevel) * scale
+				// along the normal, the luminance of the height. An unlinked or zero Normal is the
+				// flat one. Constants: midlevel, scale
+				let up = vec3f( 0.0, 0.0, 1.0 );
+				let d = ( select( 0.0, svmLum( a ), i0 != 255u ) - svmConst( c ) ) * svmConst( c + 1u );
+				let ln = length( b.xyz );
+				let n = select( up, b.xyz / max( ln, 1e-20 ), i1 != 255u && ln > 0.0 );
+				r0 = vec4f( n * d, 1.0 );
 
 			}
 			default: {}
