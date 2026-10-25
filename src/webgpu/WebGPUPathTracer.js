@@ -616,6 +616,14 @@ export class WebGPUPathTracer {
 		this.renderDelay = 500;
 
 		/**
+		 * Whether the denoiser runs by itself, once, when every pixel reaches "maxSamples". Off, it runs only
+		 * when "denoiseNow" asks.
+		 * @type {boolean}
+		 * @default true
+		 */
+		this.autoDenoise = true;
+
+		/**
 		 * Milliseconds taken to cross fade from the preview to the full render.
 		 * @type {number}
 		 * @default 500
@@ -1109,6 +1117,38 @@ export class WebGPUPathTracer {
 	/**
 	 * Discards the accumulated image and starts over. The `update*` functions call this for you.
 	 */
+	/**
+	 * Starts a denoising pass over the samples gathered so far, while the render goes on, and keeps the last
+	 * result on display until the new one is complete. For a host that schedules the passes itself, as the
+	 * Cycles viewport denoises after each update; with "autoDenoise" off the single pass at "maxSamples" does
+	 * not run. Returns the pass, or null when there is no denoiser, one is running, or the backend gathers no
+	 * guides (the megakernel, or a denoiser told not to use them).
+	 *
+	 * @returns {Promise<void>|null}
+	 */
+	denoiseNow() {
+
+		const denoiser = this._denoiser;
+		const pathTracer = this._pathTracer;
+		if ( ! denoiser || denoiser.running || ! pathTracer.outputTarget ) {
+
+			return null;
+
+		}
+
+		const features = denoiser.useAuxiliaryBuffers !== false && pathTracer.resolveDenoisingFeatures
+			? pathTracer.resolveDenoisingFeatures( this.camera )
+			: null;
+		if ( ! features ) {
+
+			return null;
+
+		}
+
+		return denoiser.refresh( pathTracer.outputTarget, features.albedo, features.normal );
+
+	}
+
 	reset() {
 
 		this._pathTracer.reset();
@@ -1228,10 +1268,11 @@ export class WebGPUPathTracer {
 		const denoiser = this._denoiser;
 		const upscaler = this._upscaler;
 
-		// the denoiser runs once the render stops, so an uncapped render never denoises
+		// the denoiser runs once the render stops, so an uncapped render never denoises - unless the host drives
+		// it with "denoiseNow" and turned "autoDenoise" off
 		// TODO: this only needs to know whether the render stopped, but measures the per pixel
 		// counts every frame. A count of the camera rays dispatched would answer it in one value
-		const awaitingDenoise = Boolean( denoiser ) && ! denoiser.complete && ! denoiser.running && maxSamples > 0;
+		const awaitingDenoise = this.autoDenoise && Boolean( denoiser ) && ! denoiser.complete && ! denoiser.running && maxSamples > 0;
 
 		// Gate on the least converged pixel. Measuring is expensive so it stops once faded in, and
 		// the check reads the last measurement rather than waiting on this one.

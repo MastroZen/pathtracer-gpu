@@ -101,6 +101,7 @@ export class OIDNDenoiser {
 		this._texture = null;
 		this._running = false;
 		this._complete = false;
+		this._progressive = true;
 		this._abort = null;
 		this._requestId = 0;
 		this._unets = { aux: null, color: null };
@@ -178,6 +179,37 @@ export class OIDNDenoiser {
 
 		}
 
+		this._progressive = true;
+		return this._run( color, albedo, normal );
+
+	}
+
+	/**
+	 * Runs a new pass over a render that kept sampling since the last one, as a viewport denoising while the
+	 * samples climb (Cycles denoises the preview after each update). The last result stays on display until
+	 * the new one is complete: the progressive wipe of "denoise" seeds the output with the raw color, and
+	 * would show the noise over the clean image tile by tile at every pass.
+	 *
+	 * @param {Texture} color - The path traced result, in linear HDR.
+	 * @param {Texture|null} albedo
+	 * @param {Texture|null} normal
+	 */
+	async refresh( color, albedo = null, normal = null ) {
+
+		if ( this._running ) {
+
+			return;
+
+		}
+
+		this._complete = false;
+		this._progressive = false;
+		return this._run( color, albedo, normal );
+
+	}
+
+	async _run( color, albedo, normal ) {
+
 		this._running = true;
 
 		const useAux = Boolean( albedo && normal );
@@ -212,8 +244,13 @@ export class OIDNDenoiser {
 		const inputs = {
 			color: { data: backend.get( color ).texture, width, height },
 
-			// the output is seeded with the raw color, so copying per tile shows a progressive wipe
-			progress: output => this._copyOutputToTexture( output, width, height ),
+			// the output is seeded with the raw color, so copying per tile shows a progressive wipe - for a first
+			// pass only: a refresh keeps the previous result until the whole image is done
+			progress: output => {
+
+				if ( this._progressive ) this._copyOutputToTexture( output, width, height );
+
+			},
 			done: output => {
 
 				this._copyOutputToTexture( output, width, height );

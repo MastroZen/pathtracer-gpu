@@ -412,13 +412,15 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 	}
 
 	// The denoising features of every pixel, two vec4 each (albedo, world normal), blended by
-	// LogicKernel as paths terminate. Sized with the task like the pixel queue; a new buffer
-	// object rebuilds the kernel bound to it. No clearing: the first sample of a pixel replaces
-	// what it holds, as with the colour.
+	// LogicKernel as paths terminate. No clearing: the first sample of a pixel replaces what it
+	// holds, as with the colour. It only GROWS, like the pixel queue: a new buffer object rebuilds
+	// the kernel bound to it, and a viewport alternates the low resolution preview with the full
+	// render at every reset - resized each time, the rebuild was a compilation, the host skipped
+	// the dispatches meanwhile and reset again, and the viewport never accumulated a sample.
 	_updateFeatureStorage( width, height ) {
 
 		const count = width * height * 2;
-		if ( ! this.featureStorage || this.featureStorage.count !== count ) {
+		if ( ! this.featureStorage || this.featureStorage.count < count ) {
 
 			this.featureStorage = new StorageBufferAttribute( new Float32Array( count * 4 ), 4 );
 			this.featureStorage.name = 'Denoising Features';
