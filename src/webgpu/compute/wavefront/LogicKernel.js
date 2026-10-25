@@ -51,12 +51,18 @@ export class LogicKernel extends ComputeKernel {
 			clampDirect: uniform( 0 ),
 			clampIndirect: uniform( 10 ),
 			transmissiveBackground: uniform( TRANSMISSIVE_BACKGROUND_OVERLAY ),
+			// whether the paths gather denoising features (MaterialKernel): without a denoiser the
+			// feature buffer is neither written nor bound to anything that reads it
+			denoisingFeatures: uniform( 0, 'uint' ),
 
 			rayDataStorage: storage( new StorageBufferAttribute( 1, 1 ), rayDataStruct ),
 			rayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
 			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
 			// the seventh storage buffer: the direct light of a medium segment is queued from here
 			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), rayQueueAtomicStruct ),
+			// the eighth, and the last of the guaranteed eight: the denoising features of every pixel,
+			// two texels each (albedo, world normal), in the rows of the output target
+			featureStorage: storage( new StorageBufferAttribute( 2, 4 ), 'vec4f' ),
 
 			globalId: globalId,
 		};
@@ -231,6 +237,7 @@ export class LogicKernel extends ComputeKernel {
 				clampDirect: f32,
 				clampIndirect: f32,
 				transmissiveBackground: u32,
+				denoisingFeatures: u32,
 
 				globalId: vec3u
 			) -> void {
@@ -791,6 +798,21 @@ export class LogicKernel extends ComputeKernel {
 					let blendedColor = ${ weightedAlphaBlendFn }( prevColor, resultColor, 1.0 / f32( sampleCount ) );
 					textureStore( ${ params.sampleCountTarget }, indexUV, vec4( ${ SAMPLE_DISPATCHED_FLAG }u | sampleCount ) );
 					textureStore( ${ params.outputTarget }, colorIndex, blendedColor );
+
+					// the denoising features the path gathered, into the running mean of the pixel with the
+					// same sample count as the colour: a buffer and not a pair of targets, since a buffer
+					// is read and written in place without the ping pong copy the colour needs
+					if ( denoisingFeatures != 0u ) {
+
+						let featureIndex = ( colorIndex.y * textureDimensions( ${ params.outputTarget } ).x + colorIndex.x ) * 2u;
+						let featureBlend = 1.0 / f32( sampleCount );
+						let packedXY = unpack2x16float( input.features.y );
+						let albedo = vec3f( unpack2x16float( input.features.x ), packedXY.x );
+						let normal = vec3f( packedXY.y, unpack2x16float( input.features.z ) );
+						${ params.featureStorage }[ featureIndex ] = mix( ${ params.featureStorage }[ featureIndex ], vec4f( albedo, 1.0 ), featureBlend );
+						${ params.featureStorage }[ featureIndex + 1u ] = mix( ${ params.featureStorage }[ featureIndex + 1u ], vec4f( normal, 1.0 ), featureBlend );
+
+					}
 
 					rayDataStorage[ index ].objectIndex = - 1;
 

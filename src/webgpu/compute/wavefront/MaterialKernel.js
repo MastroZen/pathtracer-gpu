@@ -16,6 +16,7 @@ import { huangBuildFrameFn, huangEvalFn, huangSampleFn, huangHairStruct } from '
 import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
 import { svmRecordTexelFn, svmResultsTexture } from './SvmKernel.js';
 import { PIXEL_FILTER_TABLE_SIZE, pixelFilterReadFunc } from '../../nodes/pixelFilter.wgsl.js';
+import { directionalAlbedoSheenFunc } from '../../nodes/sheen.wgsl.js';
 
 // How many null boundaries of participating media one path may cross. They advance the alpha
 // depth, so the next draws are not the ones the boundary hit already used, but they are not
@@ -80,6 +81,9 @@ export class MaterialKernel extends ComputeKernel {
 			// already holds the eight storage buffers WebGPU guarantees. Off, the ray falls
 			// uniformly inside the pixel, which is the box filter of width one
 			pixelFilterOn: uniform( 0, 'uint' ),
+			// whether paths gather the denoising features: only while a denoiser is attached, as Cycles
+			// writes its denoising passes only when denoising
+			denoisingFeatures: uniform( 0, 'uint' ),
 			pixelFilterTable: uniformArray( Array.from( { length: PIXEL_FILTER_TABLE_SIZE / 4 }, () => new Vector4() ), 'vec4' ),
 
 			globalId: globalId,
@@ -118,6 +122,7 @@ export class MaterialKernel extends ComputeKernel {
 				cameraMedium3: u32,
 				misEnabled: u32,
 				pixelFilterOn: u32,
+				denoisingFeatures: u32,
 
 				globalId: vec3u
 			) -> void {
@@ -240,6 +245,8 @@ export class MaterialKernel extends ComputeKernel {
 					rayDataStorage[ index ].mediumScatter = 0u;
 					rayDataStorage[ index ].volumeBounce = 0u;
 					rayDataStorage[ index ].dispersionWavelength = - mix( ${ DISPERSION_MIN_WAVELENGTH }.0, ${ DISPERSION_MAX_WAVELENGTH }.0, ${ rand1 }( ${ RNG_INDEX_DISPERSION_WAVELENGTH } ) );
+					// a camera ray owes the denoiser all of its guiding features, when there is a denoiser
+					rayDataStorage[ index ].features = vec4u( 0u, 0u, 0u, pack2x16float( vec2f( 1.0, f32( denoisingFeatures ) ) ) );
 
 					// write the active params & dispatched flag
 					textureStore( ${ params.sampleCountTarget }, indexUV, vec4( ${ SAMPLE_ACTIVE_FLAG }u | ${ SAMPLE_DISPATCHED_FLAG }u | samples ) );
@@ -726,6 +733,61 @@ export class MaterialKernel extends ComputeKernel {
 						rayDataStorage[ index ].rayIntersectionIndex = i32( alphaIndex );
 						rayDataStorage[ index ].shadowRayIntersectionIndex = - 1;
 						return;
+
+					}
+
+					// -- THE DENOISING FEATURES, as Cycles writes them (film_write_denoising_features_surface) --
+					//
+					// The principled surface as its lobes: the diffuse-like ones (the dielectric diffuse and
+					// the sheen) and the glossy ones (metal, glass, the dielectric specular layer). With the
+					// roughness weighting Cycles has on by default, a glossy lobe counts as diffuse by
+					// smoothstep(0, 0.15) of its GGX alpha. The albedo written is the diffuse-like part,
+					// the normal is the SHADING normal - the normal map and the bump of the node machine
+					// already in it, which is what keeps the fine detail through the denoiser - and both
+					// are weighted by how diffuse the surface is. What is left specular defers the features
+					// to the next bounce through the feature throughput (follow reflections, also on by
+					// default), so a mirror writes what it reflects. A surface passed through above writes
+					// nothing, as a transparent closure passes the features through.
+					let featureOwed = unpack2x16float( input.features.w );
+					if ( featureOwed.y != 0.0 ) {
+
+						let featureAlpha = surface.roughness * surface.roughness;
+						let glossyAsDiffuse = smoothstep( 0.0, 0.15, featureAlpha );
+						let dielectric = ( 1.0 - surface.metalness ) * ( 1.0 - surface.transmission );
+						// the sheen counts by its directional albedo (bsdf_albedo of the closure), not by its
+						// weight - a sheen of 1 adds a fraction of the light, not all of it - and the lobes
+						// under it are attenuated by it, as the layering of the principled does
+						let sheenRoughness = max( surface.sheenRoughness, 0.07 );
+						let sheenAlbedo = surface.sheen * surface.sheenColor
+							* ${ directionalAlbedoSheenFunc }( abs( dot( surface.normal, input.direction ) ), sheenRoughness * sheenRoughness );
+						let underSheen = 1.0 - max( sheenAlbedo.r, max( sheenAlbedo.g, sheenAlbedo.b ) );
+						let diffuseLobes = surface.color * dielectric * underSheen + sheenAlbedo;
+						let glossyLobes = ( surface.color * surface.metalness
+							+ surface.color * surface.transmission * ( 1.0 - surface.metalness )
+							+ vec3f( surface.f0 * dielectric ) ) * underSheen;
+						let diffuseWeight = dot( diffuseLobes, vec3f( 1.0 / 3.0 ) );
+						let glossyWeight = dot( glossyLobes, vec3f( 1.0 / 3.0 ) );
+						let sumWeight = diffuseWeight + glossyWeight;
+						var featureWeight = 0.0;
+						if ( sumWeight > 0.0 ) {
+
+							featureWeight = smoothstep( 0.0, 0.5, ( diffuseWeight + glossyWeight * glossyAsDiffuse ) / sumWeight );
+
+						}
+
+						let owed = featureOwed.x;
+						let packedXY = unpack2x16float( input.features.y );
+						let albedo = vec3f( unpack2x16float( input.features.x ), packedXY.x ) + ( diffuseLobes + glossyLobes * glossyAsDiffuse ) * featureWeight * owed;
+						let normal = vec3f( packedXY.y, unpack2x16float( input.features.z ) ) + surface.normal * featureWeight * owed;
+
+						let deferred = glossyLobes * ( 1.0 - glossyAsDiffuse ) * ( 1.0 - featureWeight );
+						let stillOwed = max( deferred.x, max( deferred.y, deferred.z ) ) > 1e-4;
+						rayDataStorage[ index ].features = vec4u(
+							pack2x16float( albedo.xy ),
+							pack2x16float( vec2f( albedo.z, normal.x ) ),
+							pack2x16float( normal.yz ),
+							pack2x16float( vec2f( owed * dot( deferred, vec3f( 1.0 / 3.0 ) ), select( 0.0, 1.0, stillOwed ) ) ),
+						);
 
 					}
 

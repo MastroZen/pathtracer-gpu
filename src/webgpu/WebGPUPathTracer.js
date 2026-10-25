@@ -559,6 +559,7 @@ export class WebGPUPathTracer {
 		this._pathTracer.setFilterGlossy( this._filterGlossyFactor );
 		this._pathTracer.setPixelFilter( this._pixelFilterTable );
 		this._pathTracer.setClamping( this._clampDirect, this._clampIndirect );
+		this._pathTracer.denoisingFeatures = Boolean( this._denoiser );
 		this.setCamera( this.camera );
 
 		// the new tracer has default environment and background maps so apply the cached scene textures
@@ -751,6 +752,14 @@ export class WebGPUPathTracer {
 		// result from a camera position that has since moved
 		this._denoiser?.reset();
 		this._denoiser = denoiser;
+		// the paths gather the guiding features only while a denoiser can use them, from the first sample:
+		// switched on mid render, the guides would blend into a buffer the earlier samples never wrote, so
+		// the render restarts, as Cycles restarts when the denoising passes change. Switched off it does not:
+		// the colour never depended on them, and a denoiser dropped after a failed pass keeps the render
+		const features = Boolean( denoiser );
+		const restart = features && ! this._pathTracer.denoisingFeatures;
+		this._pathTracer.denoisingFeatures = features;
+		if ( restart ) this.reset();
 
 		if ( denoiser ) {
 
@@ -1254,7 +1263,22 @@ export class WebGPUPathTracer {
 			// "min" so every pixel has stopped, not just the average
 			if ( awaitingDenoise && this._lastSampleCounts.min >= maxSamples ) {
 
-				denoiser.update( pathTracer.outputTarget );
+				// the guiding passes the PATHS wrote, as Cycles writes its denoising albedo and normal,
+				// when the backend gathers them: they carry what the node machine made of the surface -
+				// the textures, the normal map, the bump - which rasterized buffers cannot see, and a
+				// detail missing from the guides is noise to the filter. Otherwise the rasterized ones
+				const features = denoiser.useAuxiliaryBuffers !== false && pathTracer.resolveDenoisingFeatures
+					? pathTracer.resolveDenoisingFeatures( this.camera )
+					: null;
+				if ( features ) {
+
+					denoiser.denoise( pathTracer.outputTarget, features.albedo, features.normal );
+
+				} else {
+
+					denoiser.update( pathTracer.outputTarget );
+
+				}
 
 			}
 

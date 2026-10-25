@@ -1,4 +1,5 @@
-import { Matrix4, StorageBufferAttribute, Vector2 } from 'three/webgpu';
+import { HalfFloatType, Matrix4, RGBAFormat, StorageBufferAttribute, StorageTexture, Vector2 } from 'three/webgpu';
+import { FeatureResolveKernel } from './compute/wavefront/FeatureResolveKernel.js';
 import { PopulatePixelIndicesKernel } from './compute/wavefront/PopulatePixelIndicesKernel.js';
 import { LogicKernel } from './compute/wavefront/LogicKernel.js';
 import { MaterialKernel } from './compute/wavefront/MaterialKernel.js';
@@ -45,6 +46,8 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 		// options
 		this.seed = 0;
+		// whether the paths gather the denoising features (WebGPUPathTracer sets it with the denoiser)
+		this.denoisingFeatures = false;
 		this.envInfo = new EquirectHdrInfoNode();
 		this.backgroundInfo = new EquirectBackgroundInfo();
 		this.lightsInfo = new LightsInfoNode();
@@ -408,6 +411,81 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
+	// The denoising features of every pixel, two vec4 each (albedo, world normal), blended by
+	// LogicKernel as paths terminate. Sized with the task like the pixel queue; a new buffer
+	// object rebuilds the kernel bound to it. No clearing: the first sample of a pixel replaces
+	// what it holds, as with the colour.
+	_updateFeatureStorage( width, height ) {
+
+		const count = width * height * 2;
+		if ( ! this.featureStorage || this.featureStorage.count !== count ) {
+
+			this.featureStorage = new StorageBufferAttribute( new Float32Array( count * 4 ), 4 );
+			this.featureStorage.name = 'Denoising Features';
+			this.logicKernel.featureStorage = this.featureStorage;
+			this.logicKernel.needsUpdate = true;
+
+		}
+
+	}
+
+	// The guiding passes for the denoiser (FeatureResolveKernel), from the features gathered so far,
+	// with the normals in the view space of "camera". Returns the albedo and normal textures, in the
+	// rows of the output target, or null before the first render task sized the features.
+	resolveDenoisingFeatures( camera ) {
+
+		if ( ! this.featureStorage || ! this.denoisingFeatures ) {
+
+			return null;
+
+		}
+
+		const { renderer } = this;
+		const { width, height } = this.outputTarget;
+		if ( ! this._featureResolveKernel ) {
+
+			this._featureResolveKernel = new FeatureResolveKernel().setWorkgroupSize( 8, 8, 1 );
+			const target = name => {
+
+				const texture = new StorageTexture( 1, 1 );
+				texture.format = RGBAFormat;
+				texture.type = HalfFloatType;
+				texture.generateMipmaps = false;
+				texture.name = name;
+				return texture;
+
+			};
+			this._featureAlbedoTarget = target( 'Denoising Albedo' );
+			this._featureNormalTarget = target( 'Denoising Normal' );
+
+		}
+
+		const albedo = this._featureAlbedoTarget;
+		const normal = this._featureNormalTarget;
+		if ( albedo.image.width !== width || albedo.image.height !== height ) {
+
+			albedo.setSize( width, height );
+			normal.setSize( width, height );
+
+		}
+
+		const kernel = this._featureResolveKernel;
+		if ( kernel.featureStorage !== this.featureStorage ) {
+
+			kernel.featureStorage = this.featureStorage;
+			kernel.needsUpdate = true;
+
+		}
+		kernel.albedoTarget = albedo;
+		kernel.normalTarget = normal;
+		// the view matrix READ, never refreshed: the render owns the camera, and a recomputed matrix is not
+		// bit-identical to the one it holds. A null camera only dispatches, to compile the kernel
+		if ( camera ) kernel.viewMatrix.copy( camera.matrixWorld ).invert();
+		renderer.compute( kernel.kernel, kernel.getDispatchSize( width, height, 1 ) );
+		return { albedo, normal };
+
+	}
+
 	*createRenderTask() {
 
 		const {
@@ -440,6 +518,13 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 		// referenced via "this" since the buffer may be replaced here
 		this._updatePixelQueue( targetDimensions.x, targetDimensions.y, rayCount );
+		this._updateFeatureStorage( targetDimensions.x, targetDimensions.y );
+
+		// the resolve kernel is dispatched once here, so it compiles WITH the kernels of the task: first
+		// built when the denoiser asked for the guides, it compiled after the last sample, and a host that
+		// compiles asynchronously skips the dispatches meanwhile and restarts - the render paid twice,
+		// measured as eighteen seconds between the last sample and the denoiser
+		if ( this.denoisingFeatures ) this.resolveDenoisingFeatures( null );
 
 		// reset the trace queues — only the length header needs zeroing
 		zeroDispatchKernel.target = rayQueue;
@@ -505,6 +590,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				logicKernel.rayIntersectionsStorage = rayIntersectionsStorage;
 				logicKernel.shadowRayIntersectionsStorage = shadowRayIntersectionsStorage;
 				logicKernel.maxBounces = this.maxBounces;
+				logicKernel.denoisingFeatures = this.denoisingFeatures ? 1 : 0;
 				logicKernel.rayCount = rayCount;
 				renderer.compute( logicKernel.kernel, logicKernel.getDispatchSize( rayCount, 1, 1 ) );
 
@@ -536,6 +622,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 				materialKernel.rayCount = rayCount;
 				materialKernel.maxTransparentBounces = maxTransparentBounces;
 				materialKernel.maxBounces = this.maxBounces;
+				materialKernel.denoisingFeatures = this.denoisingFeatures ? 1 : 0;
 				materialKernel.maxSubsurfaceSteps = this.maxSubsurfaceSteps;
 				materialKernel.maxVolumeBounces = this.maxVolumeBounces;
 				materialKernel.cameraMedium0 = this.cameraMediumStack[ 0 ];

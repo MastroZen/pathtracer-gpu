@@ -127,6 +127,15 @@ export const rayDataStruct = new StructTypeNode( {
 	// the mixture with: LogicKernel or VolumeKernel writes them where the scatter happens
 	mediumPhaseWeights: 'vec4f',
 
+	// THE DENOISING FEATURES (Cycles film/denoising_passes.h): what the path owes the guiding passes of
+	// the denoiser, packed as halves in four words because every kernel copies this record whole - as
+	// three vectors and a flag it grew by twelve words and the render slowed by a tenth even with no
+	// denoiser. x and y: the albedo gathered so far and the first component of the WORLD normal; z: the
+	// rest of the normal; w: the share still owed (one at the camera, times the specular remainder of a
+	// surface that defers the features to the next bounce, a scalar where Cycles keeps a colour) and
+	// whether the path still owes any. Blended into the pixel when the path terminates.
+	features: 'vec4u',
+
 }, 'RayData' );
 
 // A ray queued for BVH traversal by the trace kernels. A "maxDist" of zero traces unbounded.

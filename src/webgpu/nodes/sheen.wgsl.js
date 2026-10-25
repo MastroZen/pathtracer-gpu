@@ -92,7 +92,7 @@ const velvetGFunc = wgslTagFn/* wgsl */`
 `;
 
 // analytic directional albedo fit, used for energy compensation when layering ( Section 5 )
-const directionalAlbedoSheenFunc = wgslTagFn/* wgsl */`
+export const directionalAlbedoSheenFunc = wgslTagFn/* wgsl */`
 
 	fn directionalAlbedoSheen( cosThetaIn: f32, alpha: f32 ) -> f32 {
 
