@@ -1198,8 +1198,12 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			intArray[ index ++ ] = mixReg( 0 ) | ( mixReg( 1 ) << 8 ) | ( mixReg( 2 ) << 16 ) | ( mixReg( 3 ) << 24 );
 			intArray[ index ++ ] = mixReg( 4 ) | ( mixReg( 5 ) << 8 ) | ( mixReg( 6 ) << 16 ) | ( 255 << 24 );
 
-			// an emission leaf: the program's colour is light (see structs.wgsl.js)
-			intArray[ index ++ ] = m.svmEmission && svmPlace ? 1 : 0;
+			// the program's light (see structs.wgsl.js): 1 an emission leaf, whose colour is light; 2 a
+			// Principled whose emission is wired, with the register of colour times strength in bits 8-15
+			const emissionReg = m.svmEmissionRegister;
+			intArray[ index ++ ] = ! svmPlace ? 0
+				: m.svmEmission ? 1
+					: Number.isInteger( emissionReg ) && emissionReg >= 0 ? 2 | ( svmReg( emissionReg ) << 8 ) : 0;
 
 			// the participating medium (see structs.wgsl.js): no "medium" is no medium. It is
 			// heterogeneous only when its density program made it into the words: a program whose

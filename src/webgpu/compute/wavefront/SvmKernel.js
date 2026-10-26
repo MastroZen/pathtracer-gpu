@@ -45,10 +45,11 @@ import { mixLeafFunc } from '../../nodes/material.wgsl.js';
 export const SVM_SLOTS_PER_ROW = 1024;
 // texel 0: the albedo as three float32 words, bit for bit, and roughness and metalness
 // as two halves of the fourth. Texel 1: the index of the material to shade, and the
-// x and y of the relief's tangent normal as two halves.
+// x and y of the relief's tangent normal as two halves. Texel 2: the light of a Principled
+// whose emission is wired, three float32 words - an emission is HDR, and no half fits it.
 // Integer and not float because a float texel may flush a denormal - a metalness of
 // zero in the high half of a bitcast word is one
-export const SVM_RECORD_TEXELS = 2;
+export const SVM_RECORD_TEXELS = 3;
 
 export function svmResultsTexture( count ) {
 
@@ -288,6 +289,13 @@ export class SvmKernel extends ComputeKernel {
 					vec4u( bitcast<vec3u>( albedo ), pack2x16float( vec2f( roughness, metalness ) ) ),
 				);
 				textureStore( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 1u ), vec4u( materialIndex, pack2x16float( normal.xy ), bitcast<u32>( normal.z ), 0u ) );
+				// the light of a Principled whose emission is wired: mode 2 of svmEmission, register in bits 8-15
+				if ( count > 0u && ( materialInfo.svmEmission & 0xffu ) == 2u ) {
+
+					let light = regs[ min( ( materialInfo.svmEmission >> 8u ) & 0xffu, ${ registers - 1 }u ) ].xyz;
+					textureStore( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 2u ), vec4u( bitcast<vec3u>( light ), 0u ) );
+
+				}
 
 			}
 		`;

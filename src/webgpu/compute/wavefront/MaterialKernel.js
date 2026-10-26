@@ -685,10 +685,18 @@ export class MaterialKernel extends ComputeKernel {
 
 						// an Emission leaf: the colour the program made is the light the surface
 						// gives off, and the record already scatters nothing (black, no specular)
-						if ( materialInfo.svmEmission != 0u ) {
+						if ( materialInfo.svmEmission == 1u ) {
 
 							surface.emission = surface.color;
 							surface.color = vec3f( 0.0 );
+
+						}
+
+						// a Principled whose emission is wired: the light the program made, on top of a surface
+						// that scatters as always. Its flat emission is black, so it is not in the light table
+						if ( ( materialInfo.svmEmission & 0xffu ) == 2u ) {
+
+							surface.emission = bitcast<vec3f>( textureLoad( ${ params.svmResults }, ${ svmRecordTexelFn }( index, 2u ) ).xyz );
 
 						}
 
