@@ -109,6 +109,8 @@ export class OIDNDenoiser {
 		this._progressive = true;
 		this._abort = null;
 		this._requestId = 0;
+		this._pendingTag = null;
+		this.resultTag = null;
 		this._unets = { aux: null, color: null };
 
 		this._resultPipeline = null;
@@ -185,6 +187,7 @@ export class OIDNDenoiser {
 		}
 
 		this._progressive = true;
+		this._pendingTag = null;
 		return this._run( color, albedo, normal );
 
 	}
@@ -198,8 +201,10 @@ export class OIDNDenoiser {
 	 * @param {Texture} color - The path traced result, in linear HDR.
 	 * @param {Texture|null} albedo
 	 * @param {Texture|null} normal
+	 * @param {*} [tag] - Stamped on the result when the pass completes ("resultTag"), so a host that keeps
+	 * results across resets can tell which render a result belongs to.
 	 */
-	async refresh( color, albedo = null, normal = null ) {
+	async refresh( color, albedo = null, normal = null, tag = null ) {
 
 		if ( this._running ) {
 
@@ -209,7 +214,32 @@ export class OIDNDenoiser {
 
 		this._complete = false;
 		this._progressive = false;
+		this._pendingTag = tag;
 		return this._run( color, albedo, normal );
+
+	}
+
+	/**
+	 * Stops a running pass and keeps the last result, unlike "reset": for a host that holds the denoised
+	 * image across resets and drops only the passes it no longer wants.
+	 */
+	abort() {
+
+		this._abort?.();
+		this._abort = null;
+		this._running = false;
+		this._requestId ++;
+
+	}
+
+	/**
+	 * The GPU texture holding the last result, or null: for a host that copies it elsewhere.
+	 *
+	 * @type {GPUTexture|null}
+	 */
+	get resultTexture() {
+
+		return this._rawTexture;
 
 	}
 
@@ -262,6 +292,7 @@ export class OIDNDenoiser {
 				this._running = false;
 				this._complete = true;
 				this._abort = null;
+				this.resultTag = this._pendingTag;
 
 			},
 		};
@@ -441,7 +472,8 @@ export class OIDNDenoiser {
 			this._rawTexture = device.createTexture( {
 				size: [ width, height ],
 				format: 'rgba16float',
-				usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+				// COPY_SRC for a host that copies the result elsewhere ("resultTexture")
+				usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
 			} );
 
 			// ExternalTexture lets three sample a gpu texture it did not create. It has no image

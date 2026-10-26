@@ -1,4 +1,4 @@
-import { Box3, DataTexture, LinearFilter, Vector2, Scene, PerspectiveCamera, Color, NoToneMapping, FloatType, Timer, StorageTexture, MeshBasicNodeMaterial, Matrix4, WebGPUCoordinateSystem } from 'three/webgpu';
+import { Box3, DataTexture, LinearFilter, Vector2, Scene, PerspectiveCamera, Color, NoToneMapping, FloatType, HalfFloatType, RGBAFormat, Timer, StorageTexture, MeshBasicNodeMaterial, Matrix4, WebGPUCoordinateSystem } from 'three/webgpu';
 import { collectEmitters } from './emitters.js';
 import { uv, uniform, varying } from 'three/tsl';
 import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
@@ -624,6 +624,24 @@ export class WebGPUPathTracer {
 		this.autoDenoise = true;
 
 		/**
+		 * Whether a reset KEEPS the last denoised image instead of dropping it, for a host that denoises the low
+		 * resolution preview while the view moves, as the Cycles viewport does: resets come every frame there, and
+		 * a pass that a reset dropped would never complete. A pass at full resolution is still stopped, and a full
+		 * resolution result is shown only for the render it was made from (its tag is the reset count).
+		 * @type {boolean}
+		 * @default false
+		 */
+		this.holdDenoisedOnReset = false;
+
+		/**
+		 * Path tracing updates per frame during the low resolution preview: Cycles renders up to four samples per
+		 * navigation update when the viewport is not denoised.
+		 * @type {number}
+		 * @default 1
+		 */
+		this.lowResSamples = 1;
+
+		/**
 		 * Milliseconds taken to cross fade from the preview to the full render.
 		 * @type {number}
 		 * @default 500
@@ -1145,14 +1163,59 @@ export class WebGPUPathTracer {
 
 		}
 
-		return denoiser.refresh( pathTracer.outputTarget, features.albedo, features.normal );
+		this._denoisingLowRes = this.lowResMode;
+		return denoiser.refresh( pathTracer.outputTarget, features.albedo, features.normal, this._resetCount ?? 0 );
+
+	}
+
+	// Copies the denoised low resolution preview into a target of its own, the start of the fade to the full
+	// render: the denoiser's texture is replaced by the first full resolution pass, and the low resolution
+	// target is a float format a copy cannot cross. True when there was a preview of that size to copy.
+	_copyDenoisedPreview( width, height ) {
+
+		const source = this._denoiser?.resultTexture;
+		if ( ! source || source.width !== width || source.height !== height ) {
+
+			return false;
+
+		}
+
+		if ( ! this._lowResDenoised ) {
+
+			this._lowResDenoised = new StorageTexture( 1, 1 );
+			this._lowResDenoised.type = HalfFloatType;
+			this._lowResDenoised.format = RGBAFormat;
+			this._lowResDenoised.generateMipmaps = false;
+
+		}
+
+		const target = this._lowResDenoised;
+		if ( target.image.width !== width || target.image.height !== height ) target.setSize( width, height );
+		const renderer = this._renderer;
+		renderer.initTexture( target );
+		const device = renderer.backend.device;
+		const encoder = device.createCommandEncoder();
+		encoder.copyTextureToTexture( { texture: source }, { texture: renderer.backend.get( target ).texture }, [ width, height, 1 ] );
+		device.queue.submit( [ encoder.finish() ] );
+		return true;
 
 	}
 
 	reset() {
 
 		this._pathTracer.reset();
-		this._denoiser?.reset();
+		this._resetCount = ( this._resetCount ?? 0 ) + 1;
+		if ( this.holdDenoisedOnReset ) {
+
+			// only a full resolution pass is dropped: a low resolution one lands on the next preview
+			if ( this._denoiser?.running && ! this._denoisingLowRes ) this._denoiser.abort();
+
+		} else {
+
+			this._denoiser?.reset();
+
+		}
+
 		this._resetTime = - 1;
 		this._fadeState = 0;
 		this._timer.update();
@@ -1250,6 +1313,8 @@ export class WebGPUPathTracer {
 				// resolution view so we can fade to it
 				lowResTarget.setSize( Math.ceil( lowResScale * width ), Math.ceil( lowResScale * height ) );
 				renderer.copyTextureToTexture( pathTracer.outputTarget, lowResTarget );
+				// and when the preview was denoised the fade starts from the clean image, not the noise under it
+				this._fadeFromDenoised = this.holdDenoisedOnReset && this._copyDenoisedPreview( lowResTarget.image.width, lowResTarget.image.height );
 
 			}
 
@@ -1261,7 +1326,8 @@ export class WebGPUPathTracer {
 		if ( ! this.pause && ( ! lowResMode || ( lowResMode && dynamicLowRes ) ) ) {
 
 			pathTracer.lowResMode = lowResMode;
-			pathTracer.update();
+			const updates = lowResMode && dynamicLowRes ? Math.max( 1, this.lowResSamples ) : 1;
+			for ( let i = 0; i < updates; i ++ ) pathTracer.update();
 
 		}
 
@@ -1297,9 +1363,9 @@ export class WebGPUPathTracer {
 		// render the content to the canvas
 		const opacity = ( lowResMode && dynamicLowRes ? 1.0 : this._fadeState );
 
-		// the low res preview is replaced moments later, so it is neither denoised nor upscaled
+		// the low res preview is neither denoised nor upscaled - unless the host holds denoised images across resets
 		let texture = pathTracer.outputTarget;
-		if ( denoiser && ! lowResMode ) {
+		if ( denoiser && ( ! lowResMode || this.holdDenoisedOnReset ) ) {
 
 			// "min" so every pixel has stopped, not just the average
 			if ( awaitingDenoise && this._lastSampleCounts.min >= maxSamples ) {
@@ -1323,7 +1389,17 @@ export class WebGPUPathTracer {
 
 			}
 
-			texture = denoiser.texture ?? texture;
+			// a result is shown at the size it was made for, and at full resolution only for the render it was made
+			// from: a held one belongs to an older camera, which the low resolution preview tolerates and a still
+			// image does not
+			const denoised = denoiser.texture;
+			const output = pathTracer.outputTarget;
+			const current = ! this.holdDenoisedOnReset || lowResMode || denoiser.resultTag === this._resetCount;
+			if ( denoised && current && denoised.image.width === output.width && denoised.image.height === output.height ) {
+
+				texture = denoised;
+
+			}
 
 		}
 
@@ -1339,7 +1415,7 @@ export class WebGPUPathTracer {
 		renderer.autoClear = dynamicLowRes ? true : opacity === 1.0;
 		blitQuad.material.transition = dynamicLowRes ? opacity : 1.0;
 		blitQuad.material.opacity = dynamicLowRes ? 1.0 : opacity;
-		blitQuad.material.fromTexture = lowResTarget;
+		blitQuad.material.fromTexture = this._fadeFromDenoised ? this._lowResDenoised : lowResTarget;
 		blitQuad.material.texture = texture;
 		blitQuad.render( renderer );
 
@@ -1510,6 +1586,7 @@ export class WebGPUPathTracer {
 		this._backgroundCache.dispose();
 		this._blitQuad.dispose();
 		this._lowResTarget.dispose();
+		this._lowResDenoised?.dispose();
 		this._atlasDebugQuad?.dispose();
 		this._sampleDensityQuad?.dispose();
 
