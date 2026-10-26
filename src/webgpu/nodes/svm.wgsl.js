@@ -44,7 +44,7 @@ export const SVM_OPCODES = Object.freeze( {
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
-export const SVM_COORD_ORDER = Object.freeze( [ 'generated', 'object', 'normal' ] );
+export const SVM_COORD_ORDER = Object.freeze( [ 'generated', 'object', 'normal', 'world' ] );
 
 /** The index tables, in the order the compiler numbers them. A test compares them too. */
 export const SVM_BLEND_ORDER = Object.freeze( [
@@ -541,7 +541,7 @@ export const SVM_REG_SOURCE = svmRegSource( SVM_REGISTERS );
 const svmRunSource = ( registers ) => /* wgsl */ `
 fn svmRun(
 	codeWord: u32, count: u32, constWord: u32, uv: vec2f,
-	generated: mat3x3f, objectPos: mat3x3f, normal: vec3f,
+	generated: mat3x3f, objectPos: mat3x3f, normal: vec3f, world: mat3x3f,
 	tri: vec3u, bary: vec3f,
 	regs: ptr<function, array<vec4f, ${ registers }>>,
 ) -> u32 {
@@ -582,6 +582,9 @@ fn svmRun(
 
 					case 0u: { r0 = vec4f( generated * shift, 1.0 ); }
 					case 1u: { r0 = vec4f( objectPos * shift, 1.0 ); }
+					// the WORLD position, which the node has no output for: the Object of another object starts
+					// from it (NODE_TEXCO_OBJECT_WITH_TRANSFORM), as a MAPPING with that object's inverse
+					case 3u: { r0 = vec4f( world * shift, 1.0 ); }
 					default: { r0 = vec4f( normal, 1.0 ); }
 
 				}

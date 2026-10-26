@@ -198,6 +198,14 @@ export class SvmKernel extends ComputeKernel {
 					( surfE1 * surfT2.y - surfE2 * surfT1.y ) * surfInv,
 					( surfE2 * surfT1.x - surfE1 * surfT2.x ) * surfInv,
 				);
+				// and the same frame in the WORLD, through the object's matrix: the position and its derivatives
+				let surfToWorld = ${ transformsBuffer }[ u32( objectIndex ) ].matrixWorld;
+				let surfLinear = mat3x3f( surfToWorld[ 0 ].xyz, surfToWorld[ 1 ].xyz, surfToWorld[ 2 ].xyz );
+				let surfWorld = mat3x3f(
+					( surfToWorld * vec4f( surfObject[ 0 ], 1.0 ) ).xyz,
+					surfLinear * surfObject[ 1 ],
+					surfLinear * surfObject[ 2 ],
+				);
 				let surfFace = cross( surfE1, surfE2 );
 				var surfNormal = select( normalize( vertexData.normal.xyz ), normalize( surfFace ), materialInfo.flatShading != 0 );
 				let surfDirection = ( ${ transformsBuffer }[ u32( objectIndex ) ].inverseMatrixWorld * vec4f( rayDataStorage[ index ].direction, 0.0 ) ).xyz;
@@ -250,7 +258,7 @@ export class SvmKernel extends ComputeKernel {
 
 					if ( count > 0u ) {
 
-						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, surfTri, select( rayDataStorage[ index ].barycoord, vec3f( 0.0 ), isCurve ), &regs );
+						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, surfWorld, surfTri, select( rayDataStorage[ index ].barycoord, vec3f( 0.0 ), isCurve ), &regs );
 
 					}
 
