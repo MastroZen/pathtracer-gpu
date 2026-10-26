@@ -1399,6 +1399,21 @@ export class WebGPUPathTracer {
 
 				texture = denoised;
 
+			} else if ( this.holdDenoisedOnReset && ! lowResMode ) {
+
+				// the full render has no denoised result of its own yet: the denoised preview of this same camera
+				// stays on display, scaled up, rather than the noise of the first samples - Cycles shows a denoised
+				// image from the first one. The preview may land after the switch, so it is looked for every frame
+				if ( denoised && denoiser.resultTag === this._resetCount ) {
+
+					texture = denoised;
+
+				} else if ( this._fadeFromDenoised ) {
+
+					texture = this._lowResDenoised;
+
+				}
+
 			}
 
 		}
