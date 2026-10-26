@@ -33,7 +33,7 @@ export const mediumRandFn = wgslFn( /* wgsl */ `
 // THE BLACKBODY of Cycles (svm_math_blackbody_color_rec709, the tables of kernel/tables.h): a
 // piecewise fit between 800 and 12000 K, linear Rec.709, NOT clamped - the Principled Volume does
 // not clamp it either. The app's materials/blackbody.ts is the same table, and its test the values
-export const mediumBlackbodyFn = wgslFn( /* wgsl */ `
+export const MEDIUM_BLACKBODY_SOURCE = /* wgsl */ `
 
 	fn mediumBlackbody( t: f32 ) -> vec3f {
 
@@ -76,7 +76,8 @@ export const mediumBlackbodyFn = wgslFn( /* wgsl */ `
 
 	}
 
-` );
+`;
+export const mediumBlackbodyFn = wgslFn( MEDIUM_BLACKBODY_SOURCE );
 
 // THE GRID OF A FLUID DOMAIN at a Generated point: one channel of the cache (the app's
 // fluid/renderGrids.ts), its values a float's bits in the program words after the programs, laid out

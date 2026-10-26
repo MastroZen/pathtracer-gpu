@@ -31,6 +31,7 @@
 // reads a buffer and draws a synthetic pattern. The image reference is a raw word
 // (packSvmPrograms writes it), everything else a float's bits.
 import { wgslFn } from 'three/tsl';
+import { MEDIUM_BLACKBODY_SOURCE, mediumBlackbodyFn } from './medium.wgsl.js';
 
 /** The opcodes. They must equal SVM_OP in src/graph/svm.ts, and a test compares them. Three was BAKED, a baked
  * map of a node the machine did not run: it left with every node running live, and the number is not reused. */
@@ -39,6 +40,7 @@ export const SVM_OPCODES = Object.freeze( {
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
 	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24, BUMP: 25, DISPLACEMENT: 26,
+	BLACKBODY: 27, NORMAL: 28,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -685,10 +687,14 @@ fn svmRun(
 			}
 			case ${ O.HUE_SATURATION }u: {
 
+				// svm_node_hsv: the Fac mixes the turned colour with the input (a linked Fac replaces the
+				// constant), and negatives are clamped
 				let hsv = svmRgbToHsv( a.xyz );
 				var hue = ( hsv.x + svmConst( c ) ) % 1.0;
 				if ( hue < 0.0 ) { hue += 1.0; }
-				r0 = vec4f( svmHsvToRgb( hue, min( 1.0, hsv.y * svmConst( c + 1u ) ), hsv.z * svmConst( c + 2u ) ), a.w );
+				let turned = svmHsvToRgb( hue, min( 1.0, hsv.y * svmConst( c + 1u ) ), hsv.z * svmConst( c + 2u ) );
+				let fac = select( svmConst( c + 3u ), svmLum( b ), i1 != 255u );
+				r0 = vec4f( max( mix( a.xyz, turned, fac ), vec3f( 0.0 ) ), a.w );
 
 			}
 			case ${ O.BRIGHT_CONTRAST }u: {
@@ -773,6 +779,25 @@ fn svmRun(
 				r0 = vec4f( n * d, 1.0 );
 
 			}
+			case ${ O.BLACKBODY }u: {
+
+				// svm_node_blackbody: the Principled Volume curve clamped at zero. Constant: the temperature
+				let t = select( svmConst( c ), svmLum( a ), i0 != 255u );
+				r0 = vec4f( max( mediumBlackbody( t ), vec3f( 0.0 ) ), 1.0 );
+
+			}
+			case ${ O.NORMAL }u: {
+
+				// svm_node_normal: the node direction (normalized by the compiler) and its dot product
+				// with the normalized input, (0, 0, 1) when unlinked. Constants: the direction
+				let dir = vec3f( svmConst( c ), svmConst( c + 1u ), svmConst( c + 2u ) );
+				let n = select( vec3f( 0.0, 0.0, 1.0 ), a.xyz, i0 != 255u );
+				let ln = length( n );
+				let d = select( 0.0, dot( dir, n / max( ln, 1e-20 ) ), ln > 0.0 );
+				r0 = vec4f( dir, 1.0 );
+				r1 = vec4f( d, d, d, 1.0 );
+
+			}
 			default: {}
 
 		}
@@ -792,7 +817,7 @@ export const SVM_RUN_SOURCE = svmRunSource( SVM_REGISTERS );
 export const SVM_HELPER_FNS = [
 	svmHashFn, svmSmoothFn, svmValueNoiseFn, svmFbmFn, svmRgbToHsvFn, svmHsvToRgbFn,
 	svmBlendChannelFn, svmBlendFn, svmMathFn, svmLumFn, svmNoiseFacFn, svmNoiseColorFn,
-	svmVoronoiFn, svmWaveFn, svmMagicFn, svmGradientFn, svmWhiteNoiseFn, svmMixFn,
+	svmVoronoiFn, svmWaveFn, svmMagicFn, svmGradientFn, svmWhiteNoiseFn, svmMixFn, mediumBlackbodyFn,
 ];
 
 /**
@@ -885,5 +910,5 @@ export const SVM_SOURCE = [
 	SVM_RGB_TO_HSV_SOURCE, SVM_HSV_TO_RGB_SOURCE, SVM_BLEND_CHANNEL_SOURCE, SVM_BLEND_SOURCE,
 	SVM_MATH_SOURCE, SVM_LUM_SOURCE, SVM_NOISE_FAC_SOURCE, SVM_NOISE_COLOR_SOURCE,
 	SVM_VORONOI_SOURCE, SVM_WAVE_SOURCE, SVM_MAGIC_SOURCE, SVM_GRADIENT_SOURCE,
-	SVM_WHITE_NOISE_SOURCE, SVM_MIX_SOURCE, SVM_REG_SOURCE, SVM_RUN_SOURCE,
+	SVM_WHITE_NOISE_SOURCE, SVM_MIX_SOURCE, MEDIUM_BLACKBODY_SOURCE, SVM_REG_SOURCE, SVM_RUN_SOURCE,
 ].join( '\n' );
