@@ -642,6 +642,15 @@ export class WebGPUPathTracer {
 		this.lowResSamples = 1;
 
 		/**
+		 * The host says the user is navigating, as Cycles keeps the low resolution preview while the view changes
+		 * between two updates ("user_is_navigating"): with "dynamicLowRes", the preview lasts as long as this is
+		 * set, beyond "renderDelay". A time window alone ends inside a slow frame of the preview.
+		 * @type {boolean}
+		 * @default false
+		 */
+		this.navigating = false;
+
+		/**
 		 * Milliseconds taken to cross fade from the preview to the full render.
 		 * @type {number}
 		 * @default 500
@@ -1293,7 +1302,7 @@ export class WebGPUPathTracer {
 
 		// check if we should be in low res mode and calculate the target size
 		let { width, height } = size;
-		const lowResMode = this._resetTime < renderDelay || ( firstFrame && dynamicLowRes && minSamples !== 0 );
+		const lowResMode = ( dynamicLowRes && this.navigating ) || this._resetTime < renderDelay || ( firstFrame && dynamicLowRes && minSamples !== 0 );
 		if ( lowResMode ) {
 
 			width = Math.ceil( lowResScale * width );
