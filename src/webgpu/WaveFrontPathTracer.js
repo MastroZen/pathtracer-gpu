@@ -326,6 +326,13 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
+	// whether a shadow ray runs the weights of a chain it crosses: a wired Fac on a chain that lets light through
+	_shadowMixes() {
+
+		return ( this.materialKernel.bvhData?.svmShadowMixes ?? 0 ) > 0;
+
+	}
+
 	// the register file of the density programs, or zero for a scene without a heterogeneous medium
 	_mediumRegisters() {
 
@@ -334,14 +341,24 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
-	// the shadow kernel with the interpreter of the density programs, or without it: a scene that
-	// has no heterogeneous medium does not pay its compile time
+	// the register file of the programs a shadow ray runs - the density of a heterogeneous medium, the weights of
+	// a chain - or zero for a scene with neither
+	_shadowRegisters() {
+
+		const bvhData = this.materialKernel.bvhData;
+		return this._shadowMixes() ? svmRegisterBucket( Math.max( 1, bvhData.svmRegisters ) ) : this._mediumRegisters();
+
+	}
+
+	// the shadow kernel with the interpreter, or without it: a scene that runs no program on a shadow ray does
+	// not pay its compile time
 	_updateShadowKernel() {
 
-		const registers = this._mediumRegisters();
-		if ( this.traceShadowRayKernel.registers !== registers ) {
+		const registers = this._shadowRegisters();
+		const shadowMixes = this._shadowMixes();
+		if ( this.traceShadowRayKernel.registers !== registers || this.traceShadowRayKernel.shadowMixes !== shadowMixes ) {
 
-			const kernel = new TraceShadowRayKernel( registers ).setWorkgroupSize( 64, 1, 1 );
+			const kernel = new TraceShadowRayKernel( registers, shadowMixes ).setWorkgroupSize( 64, 1, 1 );
 			kernel.context.random = this.traceShadowRayKernel.context.random;
 			kernel.bvhData = this.materialKernel.bvhData;
 			this.traceShadowRayKernel = kernel;

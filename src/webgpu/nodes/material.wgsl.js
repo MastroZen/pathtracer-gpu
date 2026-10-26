@@ -203,21 +203,28 @@ export const mixLeafFunc = ( materials ) => wgslTagFn/* wgsl */`
 // 1) passes one minus its opacity, white, and every other leaf stops the ray. Zero for an opaque surface, which is
 // the first test and costs one record field.
 //
-// The weights are the records' own: a chain whose Fac is wired weighs its links at a half here, because running the
-// weights' program needs the surface point SvmKernel rebuilds, and a shadow ray has none. Declared in the app
+// The weights are the records' own, or with "live" the ones the chain's weights program computed at the crossing
+// (TraceShadowRayKernel runs it, as SvmKernel does for a path), in the layout mixLeaf reads. A Transparent whose
+// colour is wired passes the colour of its node: its own program is not run here. Declared in the app
 // (docs/texture.md, passo 5).
 export const chainPassThroughFunc = ( materials ) => wgslTagFn/* wgsl */`
 
-	fn chainPassThrough( root: u32 ) -> vec3f {
+	fn chainPassThrough( root: u32, live: bool, linkWeights0: vec4f, linkWeights1: vec4f ) -> vec3f {
 
 		var index = root;
-		if ( ${ materials }[ index ].transparent == 0 && ${ materials }[ index ].mixWeight <= 0.0 ) { return vec3f( 0.0 ); }
+		if ( ! live && ${ materials }[ index ].transparent == 0 && ${ materials }[ index ].mixWeight <= 0.0 ) { return vec3f( 0.0 ); }
 		var through = vec3f( 0.0 );
 		var reach = 1.0;
 		// one step more than the links: the last leaf stays where it is, as when mixLeaf runs out of dimensions
 		for ( var mixStep = 0u; mixStep <= ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
 
-			let weight = select( 0.0, clamp( ${ materials }[ index ].mixWeight, 0.0, 1.0 ), mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u );
+			var linkWeight = ${ materials }[ index ].mixWeight;
+			if ( live ) {
+
+				linkWeight = select( linkWeights1[ min( mixStep - 4u, 3u ) ], linkWeights0[ min( mixStep, 3u ) ], mixStep < 4u );
+
+			}
+			let weight = select( 0.0, clamp( linkWeight, 0.0, 1.0 ), mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u );
 			let kind = ${ materials }[ index ].transparent;
 			var leafPass = vec3f( 0.0 );
 			if ( kind == 2 ) {

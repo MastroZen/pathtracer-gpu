@@ -274,6 +274,8 @@ export const materialStruct = new StructTypeNode( {
 	// chose instead of walking the chain. The writer decides it once, and the tracer
 	// counts it to know whether to dispatch.
 	// It took the padding word, so the record keeps its size.
+	// Bit 2: the chain's weights are a program AND a link of it lets light through - a shadow
+	// ray that crosses it runs the program too (TraceShadowRayKernel).
 	svmResolve: 'uint',
 	// THE WEIGHTS OF THE CHAIN this record heads, as a program (the app's
 	// compileMixWeights): a wired Mix Shader Fac run per hit instead of read from its

@@ -6,6 +6,7 @@ import { rayDataStruct } from './structs.js';
 import { SVM_REGISTERS } from '../../nodes/svm.wgsl.js';
 import { rngInit } from '../../nodes/random.wgsl.js';
 import { mixLeafFunc } from '../../nodes/material.wgsl.js';
+import { svmSurfacePointFunc, svmWeightFunc, svmLinkWeightsFunc } from '../../nodes/svmSurface.wgsl.js';
 
 // ── THE NODE TREE of a surface is resolved in a kernel of its own ──
 //
@@ -104,14 +105,8 @@ export class SvmKernel extends ComputeKernel {
 		const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
 		const mixLeafFn = mixLeafFunc( materialsBuffer );
 
-		// a register read as a link weight: 255 is no link, and weighs zero
-		const svmWeightFn = wgslFn( /* wgsl */ `
-			fn svmWeight( regs: ptr<function, array<vec4f, ${ registers }>>, r: u32 ) -> f32 {
-
-				return select( 0.0, ( *regs )[ min( r, ${ registers - 1 }u ) ].x, r != 255u );
-
-			}
-		` );
+		const surfacePointFn = svmSurfacePointFunc( attributesBuffer, transformsBuffer, sampleTrianglePointFn, getUvFromChannelFn, getGeneratedFn );
+		const linkWeightsFn = svmLinkWeightsFunc( svmWeightFunc( registers ), registers );
 
 		const fn = wgslTagFn/* wgsl */`
 
@@ -145,77 +140,31 @@ export class SvmKernel extends ComputeKernel {
 				}
 				var materialInfo = ${ materialsBuffer }[ materialIndex ];
 
-				// the same surface point MaterialKernel samples: a curve has no vertices, and
-				// its call is made with zeros for a struct of the right type
-				let isCurve = rayDataStorage[ index ].isCurve == 1u;
-				let vertexData = ${ sampleTrianglePointFn }(
-					select( rayDataStorage[ index ].barycoord, vec3f( 0.0 ), isCurve ),
-					select( rayDataStorage[ index ].indices, vec3u( 0u ), isCurve ),
-				);
-
 				// THE SAME SEQUENCE as MaterialKernel at this vertex, so the chain draws the
 				// dimensions reserved for it and not numbers from somewhere else. A test holds
 				// the two lines equal (tests/tracerPatch.test.mjs)
 				let indexUV = vec2u( rayDataStorage[ index ].pixelIndex >> 16, rayDataStorage[ index ].pixelIndex & 0xFFFF );
 				${ rngInit }( indexUV, rayDataStorage[ index ].seed, rayDataStorage[ index ].currentBounce + rayDataStorage[ index ].alphaDepth + rayDataStorage[ index ].subsurfaceSteps );
 
+				// ── THE SURFACE the Texture Coordinate node reads (nodes/svmSurface.wgsl.js) ──
+				//
+				// The same surface point MaterialKernel samples. A curve has no vertices: its call is made with
+				// zeros, and its program does not run. The names carry a prefix: "normal" is the relief further down
+				let isCurve = rayDataStorage[ index ].isCurve == 1u;
+				let surfTri = select( rayDataStorage[ index ].indices, vec3u( 0u ), isCurve );
+				let surfBary = select( rayDataStorage[ index ].barycoord, vec3f( 0.0 ), isCurve );
+				var surfGenerated: mat3x3f;
+				var surfObject: mat3x3f;
+				var surfWorld: mat3x3f;
+				var surfNormal: vec3f;
+				let uv = ${ surfacePointFn }( surfTri, surfBary, u32( objectIndex ), rayDataStorage[ index ].direction,
+					materialInfo.flatShading != 0, &surfGenerated, &surfObject, &surfWorld, &surfNormal );
+
 				// ONE CALL SITE of the interpreter, in one round or two: the weights of the
 				// chain when its Fac is wired, then the program of the leaf they pick. Two call
 				// sites were two copies of the interpreter in this kernel, and FXC paid for
 				// both - measured per pipeline, 15.3 s to compile against 9.3 with one.
 				// ("pass" would be the name of the counter, and it is a WGSL reserved word.)
-				let uv = ${ getUvFromChannelFn }( vertexData, 0 );
-
-				// ── THE SURFACE the Texture Coordinate node reads, in OBJECT space ──
-				//
-				// vertexData is local: MaterialKernel takes it to the world with the object's
-				// matrices. Generated and Object travel with their derivatives along the uv of
-				// this triangle - the columns of a mat3x3f are the value, d/du and d/dv - so a
-				// relief that reads a point beside the hit moves them as far as the uv moved.
-				// The normal is the shading normal on the hit side, as sd->N in Cycles: the
-				// face's where the material is flat, and flipped when the ray meets the back.
-				// The names carry a prefix: "normal" is the relief further down
-				let surfTri = select( rayDataStorage[ index ].indices, vec3u( 0u ), isCurve );
-				let surfA0 = ${ attributesBuffer }[ surfTri.x ];
-				let surfA1 = ${ attributesBuffer }[ surfTri.y ];
-				let surfA2 = ${ attributesBuffer }[ surfTri.z ];
-				let surfE1 = surfA1.position.xyz - surfA0.position.xyz;
-				let surfE2 = surfA2.position.xyz - surfA0.position.xyz;
-				let surfT0 = ${ getUvFromChannelFn }( surfA0, 0 );
-				let surfT1 = ${ getUvFromChannelFn }( surfA1, 0 ) - surfT0;
-				let surfT2 = ${ getUvFromChannelFn }( surfA2, 0 ) - surfT0;
-				let surfDet = surfT1.x * surfT2.y - surfT2.x * surfT1.y;
-				let surfInv = select( 0.0, 1.0 / surfDet, abs( surfDet ) > 1e-20 );
-				let surfG0 = ${ getGeneratedFn }( surfA0 );
-				let surfG1 = ${ getGeneratedFn }( surfA1 ) - surfG0;
-				let surfG2 = ${ getGeneratedFn }( surfA2 ) - surfG0;
-				let surfGenerated = mat3x3f(
-					${ getGeneratedFn }( vertexData ),
-					( surfG1 * surfT2.y - surfG2 * surfT1.y ) * surfInv,
-					( surfG2 * surfT1.x - surfG1 * surfT2.x ) * surfInv,
-				);
-				let surfObject = mat3x3f(
-					vertexData.position.xyz,
-					( surfE1 * surfT2.y - surfE2 * surfT1.y ) * surfInv,
-					( surfE2 * surfT1.x - surfE1 * surfT2.x ) * surfInv,
-				);
-				// and the same frame in the WORLD, through the object's matrix: the position and its derivatives
-				let surfToWorld = ${ transformsBuffer }[ u32( objectIndex ) ].matrixWorld;
-				let surfLinear = mat3x3f( surfToWorld[ 0 ].xyz, surfToWorld[ 1 ].xyz, surfToWorld[ 2 ].xyz );
-				let surfWorld = mat3x3f(
-					( surfToWorld * vec4f( surfObject[ 0 ], 1.0 ) ).xyz,
-					surfLinear * surfObject[ 1 ],
-					surfLinear * surfObject[ 2 ],
-				);
-				let surfFace = cross( surfE1, surfE2 );
-				var surfNormal = select( normalize( vertexData.normal.xyz ), normalize( surfFace ), materialInfo.flatShading != 0 );
-				let surfDirection = ( ${ transformsBuffer }[ u32( objectIndex ) ].inverseMatrixWorld * vec4f( rayDataStorage[ index ].direction, 0.0 ) ).xyz;
-				if ( dot( surfFace, surfDirection ) > 0.0 ) {
-
-					surfNormal = - surfNormal;
-
-				}
-
 				var regs: array<vec4f, ${ registers }>;
 				let liveWeights = materialInfo.svmMixCount > 0u;
 				let rounds = select( 1u, 2u, liveWeights );
@@ -232,16 +181,7 @@ export class SvmKernel extends ComputeKernel {
 
 						if ( liveWeights ) {
 
-							let w0 = materialInfo.svmMixOutputs0;
-							let w1 = materialInfo.svmMixOutputs1;
-							linkWeights0 = vec4f(
-								${ svmWeightFn }( &regs, w0 & 0xffu ), ${ svmWeightFn }( &regs, ( w0 >> 8u ) & 0xffu ),
-								${ svmWeightFn }( &regs, ( w0 >> 16u ) & 0xffu ), ${ svmWeightFn }( &regs, ( w0 >> 24u ) & 0xffu ),
-							);
-							linkWeights1 = vec4f(
-								${ svmWeightFn }( &regs, w1 & 0xffu ), ${ svmWeightFn }( &regs, ( w1 >> 8u ) & 0xffu ),
-								${ svmWeightFn }( &regs, ( w1 >> 16u ) & 0xffu ), 0.0,
-							);
+							linkWeights0 = ${ linkWeightsFn }( &regs, materialInfo.svmMixOutputs0, materialInfo.svmMixOutputs1, &linkWeights1 );
 
 						}
 
@@ -259,7 +199,7 @@ export class SvmKernel extends ComputeKernel {
 
 					if ( count > 0u ) {
 
-						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, surfWorld, surfTri, select( rayDataStorage[ index ].barycoord, vec3f( 0.0 ), isCurve ), &regs );
+						_ = ${ svmRunFn }( code, count, consts, uv, surfGenerated, surfObject, surfNormal, surfWorld, surfTri, surfBary, &regs );
 
 					}
 

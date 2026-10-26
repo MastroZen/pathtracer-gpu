@@ -7,6 +7,7 @@ import { rayQueueStruct, intersectionResultStruct } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { chainPassThroughFunc } from '../../nodes/material.wgsl.js';
+import { svmSurfacePointFunc, svmWeightFunc, svmLinkWeightsFunc } from '../../nodes/svmSurface.wgsl.js';
 import { mediumPointFunc } from '../../nodes/medium.wgsl.js';
 import {
 	mediumStackCoefficientsFunc, mediumStackEnterFn, mediumStackExitFn, mediumStackMajorantFunc, mediumStackPointFunc,
@@ -28,10 +29,11 @@ const MEDIUM_SHADOW_STEPS = 16;
 // hit distance against the light distance.
 export class TraceShadowRayKernel extends ComputeKernel {
 
-	// "registers" is the register file of the density programs of the scene, and zero when it has
-	// no heterogeneous medium: then the interpreter is not compiled in at all, since every scene
-	// would pay its compile time for a feature it does not use
-	constructor( registers = 0 ) {
+	// "registers" is the register file of the programs a shadow ray runs, and zero when the scene has
+	// none: then the interpreter is not compiled in at all, since every scene would pay its compile
+	// time for a feature it does not use. "shadowMixes" says whether one of them is the weights of a
+	// chain that lets light through - a wired Mix Shader Fac over a Transparent BSDF, the clouds
+	constructor( registers = 0, shadowMixes = false ) {
 
 		const params = {
 			bvhData: { value: null },
@@ -58,6 +60,44 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		// scene only the closed form, and the interpreter stays out of this kernel
 		const coefficientsFn = mediumStackCoefficientsFunc( materialsBuffer );
 		const chainPassThroughFn = chainPassThroughFunc( materialsBuffer );
+		// ── THE WEIGHTS OF A CHAIN, run where the shadow ray crosses it ──
+		//
+		// A wired Fac decides per point how much light passes: run at the crossing, as SvmKernel runs it for a
+		// path, on the same surface point (nodes/svmSurface.wgsl.js). Without it the chain weighed a half
+		// everywhere, and a sphere of clouds dimmed the whole planet evenly instead of casting its shadows.
+		// It is a second call site of the interpreter beside the density's, and FXC pays per call site: only
+		// a scene that has such a chain compiles it
+		let crossingWeights = '';
+		if ( shadowMixes && registers > 0 ) {
+
+			const svmRunFn = proxyFn( `bvhData.value.fns.svmRun${ registers }`, params );
+			const surfacePointFn = svmSurfacePointFunc(
+				proxy( 'bvhData.value.storage.attributes', params ), transformsBuffer,
+				proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params ),
+				proxyFn( 'bvhData.value.fns.getUvFromChannel', params ),
+				proxyFn( 'bvhData.value.fns.getGenerated', params ),
+			);
+			const linkWeightsFn = svmLinkWeightsFunc( svmWeightFunc( registers ), registers );
+			crossingWeights = wgslTagFn/* wgsl */`
+				fn crossingWeights( materialIndex: u32, hit: ${ raycastOutput }, direction: vec3f, first: ptr<function, vec4f>, second: ptr<function, vec4f> ) -> bool {
+
+					let material = ${ materialsBuffer }[ materialIndex ];
+					if ( ( material.svmResolve & 2u ) == 0u ) { return false; }
+					var generated: mat3x3f;
+					var objectPos: mat3x3f;
+					var world: mat3x3f;
+					var normal: vec3f;
+					let uv = ${ surfacePointFn }( hit.indices.xyz, hit.barycoord.xyz, u32( hit.objectIndex ), direction, material.flatShading != 0,
+						&generated, &objectPos, &world, &normal );
+					var regs: array<vec4f, ${ registers }>;
+					_ = ${ svmRunFn }( material.svmMixCode, material.svmMixCount, material.svmMixConsts, uv, generated, objectPos, normal, world, hit.indices.xyz, hit.barycoord.xyz, &regs );
+					*first = ${ linkWeightsFn }( &regs, material.svmMixOutputs0, material.svmMixOutputs1, second );
+					return true;
+
+				}
+			`;
+
+		}
 		let transmittanceFn = wgslTagFn/* wgsl */`
 			fn mediumStackTransmittance( stack: vec4u, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> vec3f {
 				if ( stack.x == 0xffffffffu ) { return vec3f( 1.0 ); }
@@ -154,7 +194,10 @@ export class TraceShadowRayKernel extends ComputeKernel {
 						// of the surface (shade_shadow.h, the transparent shadow). Here the share is the
 						// expected one of the chain (chainPassThrough), and the crossing counts against the
 						// same limit as a medium's
-						let through = ${ chainPassThroughFn }( materialIndex );
+						var linkWeights0 = vec4f( 0.0 );
+						var linkWeights1 = vec4f( 0.0 );
+						let live = ${ crossingWeights || 'false' }${ crossingWeights ? '( materialIndex, hitResult, direction, &linkWeights0, &linkWeights1 )' : '' };
+						let through = ${ chainPassThroughFn }( materialIndex, live, linkWeights0, linkWeights1 );
 						if ( all( through <= vec3f( 0.0 ) ) ) {
 
 							occluder = i32( hitResult.objectIndex );
@@ -196,6 +239,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		super( fn( params ) );
 
 		this.registers = registers;
+		this.shadowMixes = shadowMixes;
 		this.defineUniformAccessors( params );
 
 	}

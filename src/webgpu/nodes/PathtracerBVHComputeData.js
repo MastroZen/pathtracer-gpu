@@ -84,6 +84,9 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.svmResolved = 0;
 		// how many materials are a HETEROGENEOUS medium: zero, and VolumeKernel is not dispatched
 		this.svmMediums = 0;
+		// how many chains a shadow ray must run the weights program of: zero, and the shadow kernel is
+		// built without the interpreter for them
+		this.svmShadowMixes = 0;
 
 	}
 
@@ -621,7 +624,8 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.updateMaterialsMap();
 
 		const { materials, storage, structs, bvh } = this;
-		const { materialData, textures, svmWords, svmRegisters, svmResolved, svmMediums } = this.writeMaterialsBuffer( materials );
+		const { materialData, textures, svmWords, svmRegisters, svmResolved, svmMediums, svmShadowMixes } = this.writeMaterialsBuffer( materials );
+		this.svmShadowMixes = svmShadowMixes;
 		this.svmMediums = svmMediums;
 		this.svmRegisters = svmRegisters;
 		this.svmResolved = svmResolved;
@@ -808,6 +812,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		const recordLength = this.structs.material.getLength();
 		let svmResolved = 0;
 		let svmMediums = 0;
+		let svmShadowMixes = 0;
 		// THE GRIDS of the fluid domains, appended to the program words as a float's bits: the material
 		// kernel binds the eight storage buffers a device guarantees, and the words are a texture
 		const gridChunks = [];
@@ -1187,8 +1192,17 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			}
 			// and a chain whose weights are a program is walked there too
 			if ( svm.mixPlacements[ i ] ) resolves = true;
-			intArray[ index ++ ] = resolves ? 1 : 0;
+			// and a shadow ray runs the weights only where a link passes light: an opaque chain stops it anyway
+			let passes = false;
+			for ( let link = m, step = 0; link && step <= RNG_INDEX_MIX_SHADER_COUNT; link = link.mixMaterial, step ++ ) {
+
+				if ( link.transparent || link.transparentBsdf ) passes = true;
+
+			}
+			const shadowWeights = !! svm.mixPlacements[ i ] && passes;
+			intArray[ index ++ ] = ( resolves ? 1 : 0 ) | ( shadowWeights ? 2 : 0 );
 			if ( resolves ) svmResolved ++;
+			if ( shadowWeights ) svmShadowMixes ++;
 
 			// the program of the weights of the chain, and the register of each link
 			const mixPlace = svm.mixPlacements[ i ];
@@ -1270,7 +1284,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			for ( const chunk of gridChunks ) { svmWords.set( chunk, at ); at += chunk.length; }
 
 		}
-		return { materialData: intArray, textures, svmWords, svmRegisters: svm.registers, svmResolved, svmMediums };
+		return { materialData: intArray, textures, svmWords, svmRegisters: svm.registers, svmResolved, svmMediums, svmShadowMixes };
 
 	}
 
