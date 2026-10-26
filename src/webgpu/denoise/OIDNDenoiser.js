@@ -65,6 +65,9 @@ export class OIDNDenoiser {
 	 * @param {number|null} [options.maxTileSize]
 	 * @param {DynamicTileSetting|null} [options.dynamicTile] - `false` pins every tile to
 	 * `maxTileSize`. An object tunes the adaptive sizing.
+	 * @param {'auto'|'fp16'|'fp32'|null} [options.precision] - The arithmetic of the network, passed to
+	 * oidn-web. `auto` takes half precision when the device has "shader-f16", as the BALANCED quality of
+	 * Cycles does (OIDN fast math); `fp32` is its HIGH quality. Null keeps the oidn-web default.
 	 */
 	constructor( options = {} ) {
 
@@ -75,6 +78,7 @@ export class OIDNDenoiser {
 			useAuxiliaryBuffers = true,
 			maxTileSize = null,
 			dynamicTile = null,
+			precision = null,
 		} = options;
 
 		if ( ! initUNetFromURL ) {
@@ -93,6 +97,7 @@ export class OIDNDenoiser {
 		// tiling, passed through to oidn-web. Null keeps its defaults
 		this.maxTileSize = maxTileSize;
 		this.dynamicTile = dynamicTile;
+		this.precision = precision;
 
 		this.renderer = null;
 		this.scene = null;
@@ -381,6 +386,7 @@ export class OIDNDenoiser {
 				const options = { aux, hdr: true };
 				if ( this.maxTileSize !== null ) options.maxTileSize = this.maxTileSize;
 				if ( this.dynamicTile !== null ) options.dynamicTile = this.dynamicTile;
+				if ( this.precision !== null ) options.precision = this.precision;
 
 				return this.initUNetFromURL( url, { device, adapterInfo: device.adapterInfo }, options );
 
