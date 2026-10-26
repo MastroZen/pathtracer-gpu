@@ -732,10 +732,11 @@ export class MaterialKernel extends ComputeKernel {
 
 						// the surface is skipped, so no scatter or emission is staged for LogicKernel.
 						// "pdf" is left alone so the previous scatter still weights the forward MIS,
-						// and "bsdf" matches it so applying the scatter leaves the throughput as is.
+						// and "bsdf" matches it so applying the scatter leaves the throughput as is -
+						// white for an alpha, the colour for a Transparent BSDF, which tints what passes through it
 						rayDataStorage[ index ].alphaDepth = input.alphaDepth + 1u;
 						rayDataStorage[ index ].emission = vec3f( 0.0 );
-						rayDataStorage[ index ].scatterColor = vec3f( input.scatterPdf );
+						rayDataStorage[ index ].scatterColor = vec3f( input.scatterPdf ) * select( vec3f( 1.0 ), surface.color, materialInfo.transparent == 2 );
 						rayDataStorage[ index ].lightPdf = 0.0;
 						rayDataStorage[ index ].origin = rayQueue.elements[ alphaIndex ].origin;
 						rayDataStorage[ index ].rayIntersectionIndex = i32( alphaIndex );

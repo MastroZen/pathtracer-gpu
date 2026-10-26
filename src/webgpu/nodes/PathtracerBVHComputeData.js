@@ -1037,7 +1037,9 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			intArray[ index ++ ] = Number( m.flatShading );
 
 			// transparent, fogVolume - offset 64
-			intArray[ index ++ ] = Number( m.transparent );
+			// 2 is a Transparent BSDF leaf: it lets every ray through, tinted by its colour (MaterialKernel), where 1 is
+			// an alpha and passes white
+			intArray[ index ++ ] = m.transparentBsdf ? 2 : Number( m.transparent );
 			intArray[ index ++ ] = 0;
 
 			// anisotropy, anisotropyRotation, anisotropyMap - offset 66

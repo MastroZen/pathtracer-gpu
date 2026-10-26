@@ -6,6 +6,7 @@ import { rngInit } from '../../nodes/random.wgsl.js';
 import { rayQueueStruct, intersectionResultStruct } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
+import { chainPassThroughFunc } from '../../nodes/material.wgsl.js';
 import { mediumPointFunc } from '../../nodes/medium.wgsl.js';
 import {
 	mediumStackCoefficientsFunc, mediumStackEnterFn, mediumStackExitFn, mediumStackMajorantFunc, mediumStackPointFunc,
@@ -56,6 +57,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		// the transmittance of a stretch through the stack: without a heterogeneous medium in the
 		// scene only the closed form, and the interpreter stays out of this kernel
 		const coefficientsFn = mediumStackCoefficientsFunc( materialsBuffer );
+		const chainPassThroughFn = chainPassThroughFunc( materialsBuffer );
 		let transmittanceFn = wgslTagFn/* wgsl */`
 			fn mediumStackTransmittance( stack: vec4u, origin: vec3f, direction: vec3f, len: f32, rng: ptr<function, u32> ) -> vec3f {
 				if ( stack.x == 0xffffffffu ) { return vec3f( 1.0 ); }
@@ -146,21 +148,35 @@ export class TraceShadowRayKernel extends ComputeKernel {
 					let materialIndex = ${ transformsBuffer }[ u32( hitResult.objectIndex ) ].materialIndex;
 					if ( ( ${ materialsBuffer }[ materialIndex ].mediumFlags & 1u ) == 0u ) {
 
-						occluder = i32( hitResult.objectIndex );
-						occluderDist = travelled + hitResult.dist;
-						break;
+						// ── A SURFACE THAT LETS LIGHT THROUGH: a Transparent BSDF, or an alpha ──
+						//
+						// Cycles carries a shadow ray through every transparent closure, weighted by its share
+						// of the surface (shade_shadow.h, the transparent shadow). Here the share is the
+						// expected one of the chain (chainPassThrough), and the crossing counts against the
+						// same limit as a medium's
+						let through = ${ chainPassThroughFn }( materialIndex );
+						if ( all( through <= vec3f( 0.0 ) ) ) {
 
-					}
+							occluder = i32( hitResult.objectIndex );
+							occluderDist = travelled + hitResult.dist;
+							break;
 
-					// a null boundary: its medium enters the stack from the front, leaves it from the back
-					let word = ( materialIndex & 0xffffu ) | ( ( u32( hitResult.objectIndex ) & 0xffffu ) << 16u );
-					if ( hitResult.side > 0.0 ) {
-
-						stack = ${ mediumStackEnterFn }( stack, word );
+						}
+						transmittance *= through;
 
 					} else {
 
-						stack = ${ mediumStackExitFn }( stack, word );
+						// a null boundary: its medium enters the stack from the front, leaves it from the back
+						let word = ( materialIndex & 0xffffu ) | ( ( u32( hitResult.objectIndex ) & 0xffffu ) << 16u );
+						if ( hitResult.side > 0.0 ) {
+
+							stack = ${ mediumStackEnterFn }( stack, word );
+
+						} else {
+
+							stack = ${ mediumStackExitFn }( stack, word );
+
+						}
 
 					}
 

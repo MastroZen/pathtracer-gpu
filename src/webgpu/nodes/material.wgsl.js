@@ -198,6 +198,49 @@ export const mixLeafFunc = ( materials ) => wgslTagFn/* wgsl */`
 
 `;
 
+// How much of a shadow ray a surface lets through: the EXPECTED pass of its Mix Shader chain, each leaf weighted by
+// the probability mixLeaf gives it. A Transparent BSDF leaf (transparent 2) passes its colour, an alpha (transparent
+// 1) passes one minus its opacity, white, and every other leaf stops the ray. Zero for an opaque surface, which is
+// the first test and costs one record field.
+//
+// The weights are the records' own: a chain whose Fac is wired weighs its links at a half here, because running the
+// weights' program needs the surface point SvmKernel rebuilds, and a shadow ray has none. Declared in the app
+// (docs/texture.md, passo 5).
+export const chainPassThroughFunc = ( materials ) => wgslTagFn/* wgsl */`
+
+	fn chainPassThrough( root: u32 ) -> vec3f {
+
+		var index = root;
+		if ( ${ materials }[ index ].transparent == 0 && ${ materials }[ index ].mixWeight <= 0.0 ) { return vec3f( 0.0 ); }
+		var through = vec3f( 0.0 );
+		var reach = 1.0;
+		// one step more than the links: the last leaf stays where it is, as when mixLeaf runs out of dimensions
+		for ( var mixStep = 0u; mixStep <= ${ RNG_INDEX_MIX_SHADER_COUNT }u; mixStep ++ ) {
+
+			let weight = select( 0.0, clamp( ${ materials }[ index ].mixWeight, 0.0, 1.0 ), mixStep < ${ RNG_INDEX_MIX_SHADER_COUNT }u );
+			let kind = ${ materials }[ index ].transparent;
+			var leafPass = vec3f( 0.0 );
+			if ( kind == 2 ) {
+
+				leafPass = ${ materials }[ index ].color;
+
+			} else if ( kind == 1 ) {
+
+				leafPass = vec3f( 1.0 - clamp( ${ materials }[ index ].opacity, 0.0, 1.0 ) );
+
+			}
+			through += reach * ( 1.0 - weight ) * leafPass;
+			if ( weight <= 0.0 ) { break; }
+			reach *= weight;
+			index = u32( ${ materials }[ index ].mixIndex );
+
+		}
+		return through;
+
+	}
+
+`;
+
 // Subsurface: how many steps the walk inside the volume may take before the path is
 // dropped. It is the QUALITY knob - a dense medium needs many short steps to come out
 // the other side, and stopping early loses that light rather than faking it. Cycles
