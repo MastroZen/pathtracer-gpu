@@ -40,7 +40,7 @@ export const SVM_OPCODES = Object.freeze( {
 	MAGIC: 9, GRADIENT: 10, WHITE_NOISE: 11, COLOR_RAMP: 12, MIX: 13, INVERT: 14,
 	HUE_SATURATION: 15, BRIGHT_CONTRAST: 16, MATH: 17, MAP_RANGE: 18,
 	SEPARATE_COLOR: 19, COMBINE_COLOR: 20, COORD: 21, NORMAL_MAP: 22, UV_MAP: 23, ALPHA: 24, BUMP: 25, DISPLACEMENT: 26,
-	BLACKBODY: 27, NORMAL: 28,
+	BLACKBODY: 27, NORMAL: 28, VECTOR_MATH: 29,
 } );
 
 /** The outputs of the Texture Coordinate node COORD reads, in the order its flag numbers them. */
@@ -451,6 +451,75 @@ fn svmMagic( p: vec3f, depth: f32, d: f32 ) -> vec4f {
 `;
 export const svmMagicFn = wgslFn( SVM_MAGIC_SOURCE, [] );
 
+// THE PROJECTION of an Image node, in the flag bits of IMAGE: 0 flat, 1 sphere, 2 tube. Cycles' map_to_sphere and
+// map_to_tube after texco_remap_square (svm/image.h), the app's raster/imageProjection.ts, which the tests hold. The
+// comment stays OUT of the source: three's parser wants it to begin with "fn" ("Function is not a WGSL code")
+export const SVM_PROJECT_IMAGE_SOURCE = /* wgsl */ `
+fn svmProjectImage( p: vec3f, projection: u32 ) -> vec2f {
+
+	if ( projection == 0u ) { return p.xy; }
+	let c = ( p - vec3f( 0.5 ) ) * 2.0;
+	if ( projection == 2u ) {
+
+		let len = length( c.xy );
+		if ( len <= 0.0 ) { return vec2f( 0.0 ); }
+		return vec2f( ( 1.0 - atan2( c.x / len, c.y / len ) / 3.141592653589793 ) * 0.5, ( c.z + 1.0 ) * 0.5 );
+
+	}
+	let l = dot( c, c );
+	if ( l <= 0.0 ) { return vec2f( 0.0 ); }
+	var u = 0.0;
+	if ( c.x != 0.0 || c.y != 0.0 ) { u = 0.5 - atan2( c.x, c.y ) / 6.283185307179586; }
+	return vec2f( u, 1.0 - acos( clamp( c.z / sqrt( l ), - 1.0, 1.0 ) ) / 3.141592653589793 );
+
+}
+`;
+export const svmProjectImageFn = wgslFn( SVM_PROJECT_IMAGE_SOURCE, [] );
+
+// THE VECTOR MATH node, Cycles' svm_vector_math (svm/math_util.h), in the order of the app's VECTOR_MATH_OPS
+// (raster/vectorMath.ts, which the tests hold): the vector in xyz and the number in w, and each operation writes one of
+// the two - Dot Product, Distance and Length the number. Division by zero is zero per component (safe_divide), the
+// null vector normalizes to zero (safe_normalize), and so does a projection onto it
+export const SVM_VECTOR_MATH_SOURCE = /* wgsl */ `
+fn svmVectorMath( op: u32, a: vec3f, b: vec3f, c: vec3f, scale: f32 ) -> vec4f {
+
+	switch op {
+
+		case 1u: { return vec4f( a - b, 0.0 ); }
+		case 2u: { return vec4f( a * b, 0.0 ); }
+		case 3u: { return vec4f( select( a / b, vec3f( 0.0 ), b == vec3f( 0.0 ) ), 0.0 ); }
+		case 4u: { return vec4f( a * b + c, 0.0 ); }
+		case 5u: { return vec4f( cross( a, b ), 0.0 ); }
+		case 6u: {
+
+			let bb = dot( b, b );
+			return vec4f( select( vec3f( 0.0 ), b * ( dot( a, b ) / bb ), bb > 0.0 ), 0.0 );
+
+		}
+		case 7u: { return vec4f( 0.0, 0.0, 0.0, dot( a, b ) ); }
+		case 8u: { return vec4f( 0.0, 0.0, 0.0, distance( a, b ) ); }
+		case 9u: { return vec4f( 0.0, 0.0, 0.0, length( a ) ); }
+		case 10u: { return vec4f( a * scale, 0.0 ); }
+		case 11u: {
+
+			let len = length( a );
+			return vec4f( select( vec3f( 0.0 ), a / len, len > 0.0 ), 0.0 );
+
+		}
+		case 12u: { return vec4f( abs( a ), 0.0 ); }
+		case 13u: { return vec4f( min( a, b ), 0.0 ); }
+		case 14u: { return vec4f( max( a, b ), 0.0 ); }
+		case 15u: { return vec4f( floor( a ), 0.0 ); }
+		case 16u: { return vec4f( ceil( a ), 0.0 ); }
+		case 17u: { return vec4f( a - floor( a ), 0.0 ); }
+		default: { return vec4f( a + b, 0.0 ); }
+
+	}
+
+}
+`;
+export const svmVectorMathFn = wgslFn( SVM_VECTOR_MATH_SOURCE, [] );
+
 export const SVM_GRADIENT_SOURCE = /* wgsl */ `
 fn svmGradient( p: vec3f, kind: u32 ) -> f32 {
 
@@ -602,7 +671,7 @@ fn svmRun(
 			}
 			case ${ O.IMAGE }u: {
 
-				r0 = svmSample( svmWord( c ), a.xy, u32( svmConst( c + 1u ) ), u32( svmConst( c + 2u ) ) );
+				r0 = svmSample( svmWord( c ), svmProjectImage( a.xyz, flags ), u32( svmConst( c + 1u ) ), u32( svmConst( c + 2u ) ) );
 
 			}
 			case ${ O.MAPPING }u: {
@@ -789,6 +858,19 @@ fn svmRun(
 				r0 = vec4f( max( mediumBlackbody( t ), vec3f( 0.0 ) ), 1.0 );
 
 			}
+			case ${ O.VECTOR_MATH }u: {
+
+				// a vector unlinked is its three constants, the scale - a number of a converter - the luminance of its wire
+				let i3 = ins >> 24u;
+				let va = select( vec3f( svmConst( c ), svmConst( c + 1u ), svmConst( c + 2u ) ), a.xyz, i0 != 255u );
+				let vb = select( vec3f( svmConst( c + 3u ), svmConst( c + 4u ), svmConst( c + 5u ) ), b.xyz, i1 != 255u );
+				let vc = select( vec3f( svmConst( c + 6u ), svmConst( c + 7u ), svmConst( c + 8u ) ), f.xyz, i2 != 255u );
+				let scale = select( svmConst( c + 9u ), svmLum( svmReg( regs, i3 ) ), i3 != 255u );
+				let v = svmVectorMath( flags, va, vb, vc, scale );
+				r0 = vec4f( v.xyz, 1.0 );
+				r1 = vec4f( v.w, v.w, v.w, 1.0 );
+
+			}
 			case ${ O.NORMAL }u: {
 
 				// svm_node_normal: the node direction (normalized by the compiler) and its dot product
@@ -821,6 +903,7 @@ export const SVM_HELPER_FNS = [
 	svmHashFn, svmSmoothFn, svmValueNoiseFn, svmFbmFn, svmRgbToHsvFn, svmHsvToRgbFn,
 	svmBlendChannelFn, svmBlendFn, svmMathFn, svmLumFn, svmNoiseFacFn, svmNoiseColorFn,
 	svmVoronoiFn, svmWaveFn, svmMagicFn, svmGradientFn, svmWhiteNoiseFn, svmMixFn, mediumBlackbodyFn,
+	svmProjectImageFn, svmVectorMathFn,
 ];
 
 /**
@@ -912,6 +995,6 @@ export const SVM_SOURCE = [
 	SVM_HASH_SOURCE, SVM_SMOOTH_SOURCE, SVM_VALUE_NOISE_SOURCE, SVM_FBM_SOURCE,
 	SVM_RGB_TO_HSV_SOURCE, SVM_HSV_TO_RGB_SOURCE, SVM_BLEND_CHANNEL_SOURCE, SVM_BLEND_SOURCE,
 	SVM_MATH_SOURCE, SVM_LUM_SOURCE, SVM_NOISE_FAC_SOURCE, SVM_NOISE_COLOR_SOURCE,
-	SVM_VORONOI_SOURCE, SVM_WAVE_SOURCE, SVM_MAGIC_SOURCE, SVM_GRADIENT_SOURCE,
+	SVM_VORONOI_SOURCE, SVM_WAVE_SOURCE, SVM_MAGIC_SOURCE, SVM_GRADIENT_SOURCE, SVM_PROJECT_IMAGE_SOURCE, SVM_VECTOR_MATH_SOURCE,
 	SVM_WHITE_NOISE_SOURCE, SVM_MIX_SOURCE, MEDIUM_BLACKBODY_SOURCE, SVM_REG_SOURCE, SVM_RUN_SOURCE,
 ].join( '\n' );
