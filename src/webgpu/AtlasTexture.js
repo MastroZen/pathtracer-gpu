@@ -8,10 +8,17 @@ import {
 	Vector4,
 } from 'three/webgpu';
 
-// The side WebGPU guarantees on every device (maxTextureDimension2D): an 8K map of the NASA Earth keeps its texels.
-// It was 4096, and an 8192 x 4096 map became 4096 x 4096 - half the detail across, in a close-up of a planet the
-// difference between a coast and a smear
-const MAX_TEXTURE_SIZE = 8192;
+// The side of a page: what the DEVICE granted (maxTextureDimension2D, which the app asks up to 16384), never less than
+// the 8192 WebGPU guarantees. It was a fixed 4096, then a fixed 8192: the 10K maps of the NASA Earth (10800 x 5400) came
+// in at 8192, and a 21K topography at a third. Memory goes with the area of a page - 10800 x 5400 in RGBA8 is 233 MB
+const GUARANTEED_SIZE = 8192;
+const WANTED_SIZE = 16384;
+function maxTextureSize( renderer ) {
+
+	const granted = renderer?.backend?.device?.limits?.maxTextureDimension2D ?? GUARANTEED_SIZE;
+	return Math.max( GUARANTEED_SIZE, Math.min( WANTED_SIZE, granted ) );
+
+}
 const _prevClearColor = new Color();
 
 function getTextureHash( texture ) {
@@ -246,8 +253,9 @@ export class AtlasTexture {
 
 		// the page is as wide as the widest texture and as tall as the tallest, not a square: memory goes with the area,
 		// and a page of 8192 x 8192 is 256 MB where a 2:1 map wants 128
-		const width = Math.min( MAX_TEXTURE_SIZE, textures.reduce( ( v, t ) => Math.max( v, t.width ), 1 ) );
-		const height = Math.min( MAX_TEXTURE_SIZE, textures.reduce( ( v, t ) => Math.max( v, t.height ), 1 ) );
+		const maxSize = maxTextureSize( renderer );
+		const width = Math.min( maxSize, textures.reduce( ( v, t ) => Math.max( v, t.width ), 1 ) );
+		const height = Math.min( maxSize, textures.reduce( ( v, t ) => Math.max( v, t.height ), 1 ) );
 
 		// full repack of every texture
 		const { renderTarget } = this;
