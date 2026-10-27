@@ -10,7 +10,7 @@ import { chainPassThroughFunc } from '../../nodes/material.wgsl.js';
 import { svmSurfacePointFunc, svmWeightFunc, svmLinkWeightsFunc } from '../../nodes/svmSurface.wgsl.js';
 import { mediumPointFunc } from '../../nodes/medium.wgsl.js';
 import {
-	mediumStackCoefficientsFunc, mediumStackEnterFn, mediumStackExitFn, mediumStackMajorantFunc, mediumStackPointFunc,
+	mediumStackCoefficientsFunc, mediumStackEnterFunc, mediumStackExitFunc, mediumStackMajorantFunc, mediumStackPointFunc,
 	mediumStackTransmittanceFunc,
 } from '../../nodes/mediumStack.wgsl.js';
 
@@ -59,6 +59,8 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		// the transmittance of a stretch through the stack: without a heterogeneous medium in the
 		// scene only the closed form, and the interpreter stays out of this kernel
 		const coefficientsFn = mediumStackCoefficientsFunc( materialsBuffer );
+		const mediumStackEnterFn = mediumStackEnterFunc( materialsBuffer );
+		const mediumStackExitFn = mediumStackExitFunc( materialsBuffer );
 		const chainPassThroughFn = chainPassThroughFunc( materialsBuffer );
 		// ── THE WEIGHTS OF A CHAIN, run where the shadow ray crosses it ──
 		//

@@ -350,8 +350,9 @@ export const materialStruct = new StructTypeNode( {
 	mediumGridResZ: 'uint',
 	mediumGridDensity: 'uint',
 	mediumGridTemperature: 'uint',
-	// and the padding that keeps the record on the stride of four
-	_mediumAlignment0: 'uint',
+	// the second parameter of the phase of a Volume Scatter (nodes/mediumPhase.wgsl.js): the alpha of a Draine, the
+	// droplet diameter of a Mie in micrometres. Its kind is in bits 12-13 of mediumFlags. It took the padding word
+	mediumPhaseParam: 'float',
 	// total size = 348
 }, 'Material' );
 

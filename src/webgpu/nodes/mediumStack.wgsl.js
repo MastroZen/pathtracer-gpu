@@ -11,20 +11,31 @@ import { MEDIUM_MAJORANT_FLOOR, MEDIUM_MAX_STEPS, mediumRandFn } from './medium.
 export const MEDIUM_STACK_EMPTY = 0xffffffff;
 export const MEDIUM_STACK_SIZE = 4;
 
-// A path crosses a medium's boundary from the FRONT: its entry goes on the stack, unless it is
-// there already or the stack is full (volume_stack_enter_exit, the enter branch)
-export const mediumStackEnterFn = wgslFn( /* wgsl */ `
+// A path crosses a medium's boundary from the FRONT: its entries go on the stack, unless they are
+// there already or the stack is full (volume_stack_enter_exit, the enter branch). An entry is a LEAF
+// of the material's volume: the record of the material holds the first, and the ones after it follow
+// it in the material list, their count in bits 8-10 of mediumFlags - the app's withParts. Each is a
+// word of its own, so the stack sums them as it sums two media
+export const mediumStackEnterFunc = ( materials ) => wgslTagFn/* wgsl */`
 
 	fn mediumStackEnter( stack: vec4u, word: u32 ) -> vec4u {
 
 		var s = stack;
-		for ( var i = 0u; i < 4u; i ++ ) {
+		let parts = ( ${ materials }[ word & 0xffffu ].mediumFlags >> 8u ) & 7u;
+		for ( var k = 0u; k <= parts; k ++ ) {
 
-			if ( s[ i ] == word ) { return s; }
-			if ( s[ i ] == 0xffffffffu ) {
+			let w = word + k;
+			var placed = false;
+			for ( var i = 0u; i < 4u; i ++ ) {
 
-				s[ i ] = word;
-				return s;
+				if ( placed ) { break; }
+				if ( s[ i ] == w ) { placed = true; }
+				else if ( s[ i ] == 0xffffffffu ) {
+
+					s[ i ] = w;
+					placed = true;
+
+				}
 
 			}
 
@@ -33,26 +44,32 @@ export const mediumStackEnterFn = wgslFn( /* wgsl */ `
 
 	}
 
-` );
+`;
 
-// ... and from the BACK: its entry leaves, and the ones after it move up (the exit branch)
-export const mediumStackExitFn = wgslFn( /* wgsl */ `
+// ... and from the BACK: its entries leave, and the ones after them move up (the exit branch)
+export const mediumStackExitFunc = ( materials ) => wgslTagFn/* wgsl */`
 
 	fn mediumStackExit( stack: vec4u, word: u32 ) -> vec4u {
 
 		var s = stack;
-		var found = false;
-		for ( var i = 0u; i < 4u; i ++ ) {
+		let parts = ( ${ materials }[ word & 0xffffu ].mediumFlags >> 8u ) & 7u;
+		for ( var k = 0u; k <= parts; k ++ ) {
 
-			if ( ! found && s[ i ] == word ) { found = true; }
-			if ( found ) { s[ i ] = select( 0xffffffffu, s[ min( i + 1u, 3u ) ], i < 3u ); }
+			let w = word + k;
+			var found = false;
+			for ( var i = 0u; i < 4u; i ++ ) {
+
+				if ( ! found && s[ i ] == w ) { found = true; }
+				if ( found ) { s[ i ] = select( 0xffffffffu, s[ min( i + 1u, 3u ) ], i < 3u ); }
+
+			}
 
 		}
 		return s;
 
 	}
 
-` );
+`;
 
 // What the stack holds, from the records of its entries: x is the OR of their flags (bit 1 a
 // medium, bit 2 a heterogeneous one), y the Volume Sampling of the stack by the rule of
@@ -128,9 +145,10 @@ export const mediumStackPhaseWeightsFunc = ( materials ) => wgslTagFn/* wgsl */`
 
 `;
 
-// The phase of the point: the mixture of the entries' Henyey-Greensteins by the weights. It is the
-// value AND the pdf, since a mixture is sampled by picking an entry on its weight
-export const mediumStackPhaseFunc = ( materials, henyeyGreenstein ) => wgslTagFn/* wgsl */`
+// The phase of the point: the mixture of the entries' phases by the weights - each its own kind, Henyey-Greenstein,
+// Rayleigh, Draine or Mie (nodes/mediumPhase.wgsl.js). It is the value AND the pdf, since a mixture is sampled by
+// picking an entry on its weight
+export const mediumStackPhaseFunc = ( materials, phaseFn ) => wgslTagFn/* wgsl */`
 
 	fn mediumStackPhase( stack: vec4u, weights: vec4f, wo: vec3f, wi: vec3f ) -> f32 {
 
@@ -140,7 +158,9 @@ export const mediumStackPhaseFunc = ( materials, henyeyGreenstein ) => wgslTagFn
 
 			if ( stack[ i ] == 0xffffffffu ) { break; }
 			if ( weights[ i ] <= 0.0 ) { continue; }
-			value += weights[ i ] * ${ henyeyGreenstein }( wo, wi, ${ materials }[ stack[ i ] & 0xffffu ].mediumAnisotropy );
+			let m = stack[ i ] & 0xffffu;
+			let kind = ( ${ materials }[ m ].mediumFlags >> 12u ) & 3u;
+			value += weights[ i ] * ${ phaseFn }( kind, ${ materials }[ m ].mediumAnisotropy, ${ materials }[ m ].mediumPhaseParam, wo, wi );
 			total += weights[ i ];
 
 		}
@@ -150,25 +170,25 @@ export const mediumStackPhaseFunc = ( materials, henyeyGreenstein ) => wgslTagFn
 
 `;
 
-// The entry a scatter takes its phase from, picked on the weights with one number in [0, 1); its
-// anisotropy is what the direction is drawn with
+// The entry a scatter takes its phase from, picked on the weights with one number in [0, 1): its phase is what the
+// direction is drawn with - x the kind, y the g, z the second parameter
 export const mediumStackPickPhaseFunc = ( materials ) => wgslTagFn/* wgsl */`
 
-	fn mediumStackPickPhase( stack: vec4u, weights: vec4f, u: f32 ) -> f32 {
+	fn mediumStackPickPhase( stack: vec4u, weights: vec4f, u: f32 ) -> vec3f {
 
 		let total = weights.x + weights.y + weights.z + weights.w;
 		var pick = u * total;
-		var g = ${ materials }[ stack.x & 0xffffu ].mediumAnisotropy;
+		var m = stack.x & 0xffffu;
 		for ( var i = 0u; i < 4u; i ++ ) {
 
 			if ( stack[ i ] == 0xffffffffu ) { break; }
 			if ( weights[ i ] <= 0.0 ) { continue; }
-			g = ${ materials }[ stack[ i ] & 0xffffu ].mediumAnisotropy;
+			m = stack[ i ] & 0xffffu;
 			if ( pick < weights[ i ] ) { break; }
 			pick -= weights[ i ];
 
 		}
-		return g;
+		return vec3f( f32( ( ${ materials }[ m ].mediumFlags >> 12u ) & 3u ), ${ materials }[ m ].mediumAnisotropy, ${ materials }[ m ].mediumPhaseParam );
 
 	}
 

@@ -40,7 +40,10 @@ export function cameraMediumStack( scene, camera, bvhData ) {
 		const material = Array.isArray( object.material ) ? object.material[ hit.face.materialIndex ?? 0 ] : object.material;
 		if ( material?.medium && materialsMap.has( material ) ) {
 
-			stack[ count ++ ] = ( ( materialsMap.get( material ) & 0xffff ) | ( ( bvhData.getObjectSlot( object ) & 0xffff ) << 16 ) ) >>> 0;
+			// the material and the leaves of its volume after it, as mediumStackEnter puts them
+			const word = ( ( materialsMap.get( material ) & 0xffff ) | ( ( bvhData.getObjectSlot( object ) & 0xffff ) << 16 ) ) >>> 0;
+			const parts = Math.min( material.mediumParts?.length ?? 0, 7 );
+			for ( let k = 0; k <= parts && count < MEDIUM_STACK_SIZE; k ++ ) stack[ count ++ ] = word + k;
 
 		}
 

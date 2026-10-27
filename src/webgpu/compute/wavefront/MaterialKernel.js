@@ -3,11 +3,12 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, uniformArray, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { mediumStackEnterFn, mediumStackExitFn, mediumStackPhaseFunc, mediumStackPickPhaseFunc } from '../../nodes/mediumStack.wgsl.js';
+import { mediumPhaseFn, mediumPhaseSampleFn } from '../../nodes/mediumPhase.wgsl.js';
+import { mediumStackEnterFunc, mediumStackExitFunc, mediumStackPhaseFunc, mediumStackPickPhaseFunc } from '../../nodes/mediumStack.wgsl.js';
 import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR, RNG_INDEX_MEDIUM_PHASE } from '../../nodes/random.wgsl.js';
 import { rayDataStruct, rayQueueAtomicStruct, pixelQueueStruct } from './structs.js';
 import { SAMPLE_ACTIVE_FLAG, SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
-import { mixLeafFunc, applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, sampleHenyeyGreensteinFunc, henyeyGreensteinPhaseFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
+import { mixLeafFunc, applyDispersionFunc, dispersionColorWeightFunc, DISPERSION_MIN_WAVELENGTH, DISPERSION_MAX_WAVELENGTH, sampleHenyeyGreensteinFunc, SUBSURFACE_MAX_STEPS, subsurfaceAlphaFunc, subsurfaceSigmaFunc } from '../../nodes/material.wgsl.js';
 import { isTerminatingScatterFunc, offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { LIGHT_EPSILON } from '../../nodes/lights.wgsl.js';
 import { misHeuristicFn } from '../../nodes/sampling.wgsl.js';
@@ -92,8 +93,11 @@ export class MaterialKernel extends ComputeKernel {
 		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
 		// the phase of a scatter in a stack of media: built ONCE, since two nodes of one function
 		// would declare it twice in the shader
-		const stackPhaseFn = mediumStackPhaseFunc( materialsBuffer, henyeyGreensteinPhaseFunc );
+		const stackPhaseFn = mediumStackPhaseFunc( materialsBuffer, mediumPhaseFn );
 		const stackPickPhaseFn = mediumStackPickPhaseFunc( materialsBuffer );
+		// the stack takes or drops every leaf of a material's volume at once (nodes/mediumStack.wgsl.js)
+		const mediumStackEnterFn = mediumStackEnterFunc( materialsBuffer );
+		const mediumStackExitFn = mediumStackExitFunc( materialsBuffer );
 		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
 		const getCameraRayFn = proxyFn( 'bvhData.value.fns.getCameraRay', params );
 		const sampleTrianglePointFn = proxyFn( 'bvhData.value.fns.sampleTrianglePoint', params );
@@ -276,13 +280,20 @@ export class MaterialKernel extends ComputeKernel {
 						// the phase of the point is the MIXTURE of the stack's, on the weights the scatter
 						// wrote: an entry picked on them draws the direction, and the pdf is the mixture's
 						let phaseDraw = ${ rand3 }( ${ RNG_INDEX_MEDIUM_PHASE } );
-						let g = ${ stackPickPhaseFn }( input.mediumStack, input.mediumPhaseWeights, phaseDraw.z );
+						let picked = ${ stackPickPhaseFn }( input.mediumStack, input.mediumPhaseWeights, phaseDraw.z );
 						let scatterPoint = input.origin + input.direction * input.dist;
 						let newBounce = input.currentBounce + 1u;
 						let newVolumeBounce = input.volumeBounce + 1u;
 						let budgetSpent = newVolumeBounce > maxVolumeBounces || newBounce >= maxBounces;
 
-						let nextDirection = ${ sampleHenyeyGreensteinFunc }( input.direction, g, phaseDraw.xy );
+						// the picked entry's phase draws the direction: Henyey-Greenstein as before, the other three by the
+						// inversions of Cycles (nodes/mediumPhase.wgsl.js)
+						var nextDirection = ${ sampleHenyeyGreensteinFunc }( input.direction, picked.y, phaseDraw.xy );
+						if ( u32( picked.x ) != 0u ) {
+
+							nextDirection = ${ mediumPhaseSampleFn }( u32( picked.x ), picked.y, picked.z, input.direction, phaseDraw.xy );
+
+						}
 						let phasePdf = ${ stackPhaseFn }( input.mediumStack, input.mediumPhaseWeights, input.direction, nextDirection );
 						var phaseColor = vec3f( phasePdf );
 						var isTerminated = budgetSpent;

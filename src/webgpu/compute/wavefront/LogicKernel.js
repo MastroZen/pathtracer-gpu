@@ -16,7 +16,7 @@ import {
 } from '../../nodes/random.wgsl.js';
 import { ENVIRONMENT_LIGHT_TYPE, LIGHT_EPSILON, LIGHT_FAR_DISTANCE, isMISWeightLightFn, neeSlotProbabilityFn } from '../../nodes/lights.wgsl.js';
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
-import { henyeyGreensteinPhaseFunc } from '../../nodes/material.wgsl.js';
+import { mediumPhaseFn } from '../../nodes/mediumPhase.wgsl.js';
 import { mediumStackCoefficientsFunc, mediumStackFlagsFunc, mediumStackPhaseFunc, mediumStackPhaseWeightsFunc } from '../../nodes/mediumStack.wgsl.js';
 import { rayDataStruct, intersectionResultStruct, rayQueueAtomicStruct } from './structs.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
@@ -90,7 +90,7 @@ export class LogicKernel extends ComputeKernel {
 		const stackFlagsFn = mediumStackFlagsFunc( materialsBuffer );
 		const stackCoefficientsFn = mediumStackCoefficientsFunc( materialsBuffer );
 		const stackPhaseWeightsFn = mediumStackPhaseWeightsFunc( materialsBuffer );
-		const stackPhaseFn = mediumStackPhaseFunc( materialsBuffer, henyeyGreensteinPhaseFunc );
+		const stackPhaseFn = mediumStackPhaseFunc( materialsBuffer, mediumPhaseFn );
 
 		// -- THE NEE CHOICE -- one slot by importance (neeSlotProbability) with a single number: walk
 		// the slots in a fixed order - lights, environment, table - to the one whose share of [0, 1)
@@ -721,8 +721,12 @@ export class LogicKernel extends ComputeKernel {
 								// camera segments gathered, not assigned over it: a medium crossed on the way out
 								// - a fire in front of the sky - emits into the path before it escapes, and the
 								// assignment erased it (measured: an emitting slab in front of the void read zero,
-								// and 0.5000 with a black wall behind). The alpha stays the background's
-								let background = ${ clampPathContributionFunc }( bg.a * bg.rgb, input.currentBounce, clampDirect, clampIndirect );
+								// and 0.5000 with a black wall behind). The alpha stays the background's.
+								// And TIMES THE THROUGHPUT, as Cycles does: a camera segment that crossed a medium or
+								// a Transparent BSDF on its way out carries their transmittance and tint, and without
+								// it an absorbing cube in front of a white sky stayed white. Straight to the sky the
+								// throughput is one, so nothing else changes
+								let background = ${ clampPathContributionFunc }( bg.a * bg.rgb * throughputColor, input.currentBounce, clampDirect, clampIndirect );
 								resultColor = vec4f( resultColor.rgb + background, bg.a );
 
 							} else {

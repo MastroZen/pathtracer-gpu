@@ -12,6 +12,9 @@ import { packSvmPrograms, svmRunFn, SVM_REGISTER_BUCKETS } from './svm.wgsl.js';
 import { mediumGridFunc } from './medium.wgsl.js';
 import { RNG_INDEX_MIX_SHADER_COUNT } from './random.wgsl.js';
 
+// the phases of a Volume Scatter as the app names them (graph/medium.ts MEDIUM_PHASES), and the kind mediumPhase reads
+const MEDIUM_PHASE_KINDS = { henyeyGreenstein: 0, rayleigh: 1, draine: 2, mie: 3 };
+
 // ── THE WORDS OF THE NODE MACHINE live in a TEXTURE ──
 //
 // The material kernel already binds eight storage buffers, the minimum a device
@@ -542,6 +545,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		const { materials, materialsMap } = this;
 		materialsMap.clear();
 		materials.length = 0;
+		const leaves = new Set();
 		this.getRootObject().traverse( o => {
 
 			if ( o.material ) {
@@ -560,17 +564,27 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		} );
 
-		materials
+		// sorted for a stable order, but the LEAVES of a volume stay right after their material: the medium
+		// stack reaches them as the material's index plus one, two, three (mediumStackEnter)
+		const owners = materials
+			.filter( m => ! leaves.has( m ) )
 			.sort( ( a, b ) => {
 
 				return a.uuid < b.uuid ? 1 : - 1;
 
-			} )
-			.forEach( ( m, i ) => {
-
-				materialsMap.set( m, i );
-
 			} );
+		materials.length = 0;
+		for ( const m of owners ) {
+
+			materials.push( m );
+			for ( const part of m.mediumParts ?? [] ) if ( leaves.has( part ) ) materials.push( part );
+
+		}
+		materials.forEach( ( m, i ) => {
+
+			materialsMap.set( m, i );
+
+		} );
 
 		function add( mat ) {
 
@@ -578,6 +592,18 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 				materials.push( mat );
 				materialsMap.set( mat, - 1 );
+
+				// the LEAVES of the material's volume after the first, right after it: a boundary crossed
+				// puts the material's word and the next ones on the medium stack (mediumStackEnter), so
+				// they must follow it in the list. They belong to no mesh, like a Mix's other branch
+				for ( const part of mat.mediumParts ?? [] ) {
+
+					if ( materialsMap.has( part ) ) continue;
+					materials.push( part );
+					materialsMap.set( part, - 1 );
+					leaves.add( part );
+
+				}
 
 				// Mix Shader: the other branch usually belongs to no mesh of its own, so
 				// walking the scene would never reach it. Following the reference here is
@@ -1231,8 +1257,12 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			if ( medium && ( mediumPlace || grid ) ) svmMediums ++;
 			// bits 3 and 4: the material's Volume Sampling - Distance, or Equiangular alone; neither is
 			// Multiple Importance, the default
+			// bits 8-10: how many LEAVES of the volume follow this record in the list (the app's withParts)
 			intArray[ index ++ ] = medium ? ( medium.onlyVolume ? 1 : 0 ) | 2 | ( mediumPlace || grid ? 4 : 0 )
-				| ( medium.sampling === 'distance' ? 8 : 0 ) | ( medium.sampling === 'equiangular' ? 16 : 0 ) : 0;
+				| ( medium.sampling === 'distance' ? 8 : 0 ) | ( medium.sampling === 'equiangular' ? 16 : 0 )
+				| ( Math.min( m.mediumParts?.length ?? 0, 7 ) << 8 )
+				// bits 12-13: the phase of the Volume Scatter, in the order of the app's MEDIUM_PHASES
+				| ( ( MEDIUM_PHASE_KINDS[ medium.phase ] ?? 0 ) << 12 ) : 0;
 			for ( const v of medium ? medium.scatter : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			for ( const v of medium ? medium.absorption : [ 0, 0, 0 ] ) floatArray[ index ++ ] = v;
 			floatArray[ index ++ ] = medium ? medium.anisotropy : 0.0;
@@ -1260,8 +1290,8 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			intArray[ index ++ ] = gridChannel( grid?.density ?? null );
 			intArray[ index ++ ] = gridChannel( grid?.temperature ?? null );
 
-			// the padding that keeps the record on the stride of the struct: see structs.wgsl.js
-			intArray[ index ++ ] = 0;
+			// the second parameter of the phase, where the padding was: see structs.wgsl.js
+			floatArray[ index ++ ] = medium ? ( medium.phaseParam ?? 0 ) : 0.0;
 
 			if ( index - recordStart !== recordLength ) {
 
