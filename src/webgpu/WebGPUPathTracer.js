@@ -2,7 +2,8 @@ import { Box3, DataTexture, LinearFilter, Vector2, Scene, PerspectiveCamera, Col
 import { collectEmitters } from './emitters.js';
 import { uv, uniform, varying } from 'three/tsl';
 import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
-import { ndcToCameraRay, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { cameraRayFunc } from './nodes/cameraRay.wgsl.js';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { RenderToScreenNodeMaterial } from './materials/RenderToScreenMaterial.js';
 import { getDebugBoundsFunction } from './nodes/debugBounds.wgsl.js';
@@ -752,9 +753,13 @@ export class WebGPUPathTracer {
 		this.material = new GltfCompliantMaterial();
 
 		// default camera ray generation ( perspective / orthographic ), assigned onto each bvh compute
-		// data's fns so the kernels can proxy it. The uniform is the inverse view-projection
-		// ( world * inverseProjection ), premultiplied on the CPU so no matrix multiply runs per ray.
-		this._invViewProjectionMatrix = uniform( new Matrix4() );
+		// data's fns so the kernels can proxy it. The ray is built in camera space and then moved to the
+		// world (nodes/cameraRay.wgsl.js): through the premultiplied inverse view-projection the far point
+		// cancels in float32 when far/near is large, and the image came out in blocks
+		this._cameraInverseProjection = uniform( new Matrix4() );
+		this._cameraWorld = uniform( new Matrix4() );
+		this._cameraFar = uniform( 1 );
+		this._cameraOrthographic = uniform( 0, 'uint' );
 		this._cameraRayFnHandle = null;
 
 		// initialize the scene so it doesn't fail
@@ -961,7 +966,10 @@ export class WebGPUPathTracer {
 
 			// add a default camera ray getter. the update function is called when the camera is
 			// updated to trigger any necessary uniform updates.
-			const invViewProjectionMatrix = this._invViewProjectionMatrix;
+			const inverseProjection = this._cameraInverseProjection;
+			const cameraWorld = this._cameraWorld;
+			const cameraFar = this._cameraFar;
+			const orthographic = this._cameraOrthographic;
 			this._cameraRayFnHandle = {
 				update: () => {
 
@@ -974,7 +982,10 @@ export class WebGPUPathTracer {
 
 					}
 
-					invViewProjectionMatrix.value.multiplyMatrices( camera.matrixWorld, camera.projectionMatrixInverse );
+					inverseProjection.value.copy( camera.projectionMatrixInverse );
+					cameraWorld.value.copy( camera.matrixWorld );
+					cameraFar.value = camera.far;
+					orthographic.value = camera.isOrthographicCamera ? 1 : 0;
 					return false;
 
 				},
@@ -982,7 +993,7 @@ export class WebGPUPathTracer {
 					fn getCameraRay( uv: vec2f, resolution: vec2f, ray: ptr<function, ${ rayStruct }> ) -> bool {
 
 						let ndc = uv * 2.0 - vec2f( 1.0 );
-						*ray = ${ ndcToCameraRay }( ndc, ${ invViewProjectionMatrix } );
+						*ray = ${ cameraRayFunc }( ndc, ${ inverseProjection }, ${ cameraWorld }, ${ cameraFar }, ${ orthographic } );
 						return true;
 
 					}

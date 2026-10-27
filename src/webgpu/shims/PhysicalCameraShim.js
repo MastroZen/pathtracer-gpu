@@ -1,6 +1,7 @@
 import { Matrix4, WebGPUCoordinateSystem } from 'three';
 import { uniform, PI } from 'three/tsl';
-import { wgslTagFn, rayStruct, ndcToCameraRay } from 'three-mesh-bvh/webgpu';
+import { wgslTagFn, rayStruct } from 'three-mesh-bvh/webgpu';
+import { cameraRayFunc } from '../nodes/cameraRay.wgsl.js';
 import { rand3, RNG_INDEX_APERTURE_SAMPLE } from '../nodes/random.wgsl.js';
 import { PhysicalCamera } from '../../objects/PhysicalCamera.js';
 
@@ -46,9 +47,10 @@ const samplePolygon = wgslTagFn/* wgsl */`
 
 PhysicalCamera.prototype.getCameraRayFn = function getCameraRayFn() {
 
-	// camera transform fields
-	const invViewProjectionMatrix = uniform( new Matrix4() );
+	// camera transform fields: the base ray is built in camera space (nodes/cameraRay.wgsl.js)
+	const inverseProjection = uniform( new Matrix4() );
 	const cameraWorldMatrix = uniform( new Matrix4() );
+	const cameraFar = uniform( 1 );
 
 	// bokeh shape fields
 	const focusDistance = uniform( 0 );
@@ -62,7 +64,7 @@ PhysicalCamera.prototype.getCameraRayFn = function getCameraRayFn() {
 
 			// base ray
 			let ndc = uv * 2.0 - vec2f( 1.0 );
-			*ray = ${ ndcToCameraRay }( ndc, ${ invViewProjectionMatrix } );
+			*ray = ${ cameraRayFunc }( ndc, ${ inverseProjection }, ${ cameraWorldMatrix }, ${ cameraFar }, 0u );
 
 			// depth of field
 			// measure focus distance along the optical axis so the focal surface is a flat
@@ -111,8 +113,9 @@ PhysicalCamera.prototype.getCameraRayFn = function getCameraRayFn() {
 		this.updateMatrixWorld();
 		this.updateProjectionMatrix();
 
-		invViewProjectionMatrix.value.multiplyMatrices( this.matrixWorld, this.projectionMatrixInverse );
+		inverseProjection.value.copy( this.projectionMatrixInverse );
 		cameraWorldMatrix.value.copy( this.matrixWorld );
+		cameraFar.value = this.far;
 
 		focusDistance.value = this.focusDistance;
 		bokehSize.value = this.bokehSize;
