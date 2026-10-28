@@ -2,7 +2,7 @@ import { DataTexture, Vector2, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from './ComputeKernel.js';
 import { texture, sampler, uniform, globalId, textureStore } from 'three/tsl';
 import { rngInit, rngNextBounce, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_BACKGROUND_SAMPLE, RNG_INDEX_DIRECT_LIGHT_SAMPLE, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_ALPHA_TEST } from '../nodes/random.wgsl.js';
-import { misHeuristicFn, weightedAlphaBlendFn } from '../nodes/sampling.wgsl.js';
+import { misHeuristicFn, accumulateSampleFn } from '../nodes/sampling.wgsl.js';
 import { proxy, proxyFn, wgslTagFn, rayStruct } from 'three-mesh-bvh/webgpu';
 import { clampPathContributionFunc, isTerminatingScatterFunc, offsetRayOriginFunc } from '../nodes/utils.wgsl.js';
 import { lightRecordStruct } from '../nodes/structs.wgsl.js';
@@ -465,7 +465,7 @@ export class PathTracerMegaKernel extends ComputeKernel {
 				let colorIndex = vec2u( indexUV.x, targetDimensions.y - 1u - indexUV.y );
 
 				let prevColor = textureLoad( ${ params.prevOutputTarget }, colorIndex );
-				let blendedColor = ${ weightedAlphaBlendFn }( prevColor, resultColor, 1.0 / f32( nextSampleCount ) );
+				let blendedColor = ${ accumulateSampleFn }( prevColor, resultColor, 1.0 / f32( nextSampleCount ) );
 				textureStore( ${ params.sampleCountTarget }, indexUV, vec4( nextSampleCount ) );
 				textureStore( ${ params.outputTarget }, colorIndex, blendedColor );
 

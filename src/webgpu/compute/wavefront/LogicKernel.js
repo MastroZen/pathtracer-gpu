@@ -2,7 +2,7 @@ import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
 import { proxy, proxyFn, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { misHeuristicFn, weightedAlphaBlendFn } from '../../nodes/sampling.wgsl.js';
+import { misHeuristicFn, accumulateSampleFn } from '../../nodes/sampling.wgsl.js';
 import { clampPathContributionFunc, isTerminatingScatterFunc } from '../../nodes/utils.wgsl.js';
 import { TRANSMISSIVE_BACKGROUND_ENVIRONMENT, TRANSMISSIVE_BACKGROUND_OVERLAY, TRANSMISSIVE_BACKGROUND_TRANSPARENT } from '../../constants.js';
 import {
@@ -799,7 +799,7 @@ export class LogicKernel extends ComputeKernel {
 					// blend the finished sample into the output and free the slot for a new camera ray
 					let sampleCount = storedSamples + 1;
 					let prevColor = textureLoad( ${ params.prevOutputTarget }, colorIndex );
-					let blendedColor = ${ weightedAlphaBlendFn }( prevColor, resultColor, 1.0 / f32( sampleCount ) );
+					let blendedColor = ${ accumulateSampleFn }( prevColor, resultColor, 1.0 / f32( sampleCount ) );
 					textureStore( ${ params.sampleCountTarget }, indexUV, vec4( ${ SAMPLE_DISPATCHED_FLAG }u | sampleCount ) );
 					textureStore( ${ params.outputTarget }, colorIndex, blendedColor );
 

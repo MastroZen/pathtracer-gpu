@@ -207,22 +207,18 @@ export const equirectDirectionPdfFn = wgslFn( /* wgsl */ `
 
 `, [ constants, equirectDirectionToUvFn ] );
 
-export const weightedAlphaBlendFn = wgslFn( /* wgsl */`
+// The running mean of a pixel, PREMULTIPLIED as the render buffer of Cycles is: color and alpha are averaged
+// alike. A path escaping to a transparent film adds its gathered light with alpha zero, and a path that scattered
+// in a medium adds its light with alpha one, so the mean colour is already the coverage times the colour behind.
+// The blend it replaces divided by the mean alpha (straight colour): a thin atmosphere at the limb, hit by few of
+// the paths, read as full-strength blue at a tiny alpha; the denoiser smoothed the colour and left the alpha raw,
+// and the composited rim came out speckled. It also dropped the light of an alpha-zero path - a fire in front of
+// a transparent sky.
+export const accumulateSampleFn = wgslFn( /* wgsl */`
 
-	fn weightedAlphaBlend( prevColor: vec4f, newColor: vec4f, weight: f32 ) -> vec4f {
+	fn accumulateSample( prevColor: vec4f, newColor: vec4f, weight: f32 ) -> vec4f {
 
-		let invWeight = 1.0 - weight;
-		let totalAlpha = prevColor.a * invWeight + newColor.a * weight;
-		var blendedColor = vec4f( 0 );
-		if ( totalAlpha != 0.0 ) {
-
-			let prevContrib = prevColor.rgb * invWeight * prevColor.a / totalAlpha;
-			let resContrib = newColor.rgb * weight * newColor.a / totalAlpha;
-			blendedColor = vec4f( prevContrib + resContrib, totalAlpha );
-
-		}
-
-		return blendedColor;
+		return mix( prevColor, newColor, weight );
 
 	}
 
