@@ -32,6 +32,13 @@ import * as RANDOM_BLUE_DITHER from './nodes/rand/bluedither.wgsl.js';
  * @property {number} samplesPerSecond - Mean samples accumulated per second since the last reset.
  */
 
+/** Il colore del primo texel in tutti gli altri: la texture del fondo uniforme e' 4 x 4 (vedi `TextureCache`). */
+function fillTexels( data ) {
+
+	for ( let i = 4; i < data.length; i += 4 ) data.set( data.subarray( 0, 4 ), i );
+
+}
+
 const _resolution = new Vector2();
 const _color = new Color();
 
@@ -44,7 +51,9 @@ class TextureCache {
 		this.texture = null;
 		this.hash = null;
 
-		const colorTex = new DataTexture( new Uint8Array( [ 255, 255, 255, 255 ] ), 1, 1 );
+		// 4 x 4 e non 1 x 1: sulla GPU della VM (Dawn su D3D11) un DataTexture da un pixel arrivava allo shader con la
+		// memoria non inizializzata — col film trasparente il cielo usciva con alfa 0, 0,235 o 1 secondo il giro
+		const colorTex = new DataTexture( new Uint8Array( 64 ).fill( 255 ), 4, 4 );
 		colorTex.minFilter = LinearFilter;
 		colorTex.magFilter = LinearFilter;
 		this.colorTex = colorTex;
@@ -73,6 +82,7 @@ class TextureCache {
 			colorTex.image.data[ 1 ] = _color.g * 255;
 			colorTex.image.data[ 2 ] = _color.b * 255;
 			colorTex.image.data[ 3 ] = clearAlpha * 255;
+			fillTexels( colorTex.image.data );
 
 			value = colorTex;
 			hash = colorTex.image.data.join();
@@ -84,6 +94,7 @@ class TextureCache {
 			colorTex.image.data[ 1 ] = value.g * 255;
 			colorTex.image.data[ 2 ] = value.b * 255;
 			colorTex.image.data[ 3 ] = 255;
+			fillTexels( colorTex.image.data );
 
 			value = colorTex;
 			hash = colorTex.image.data.join();
