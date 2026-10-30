@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 
 // THE PIXEL FILTER OF CYCLES: the inverted CDF of the filter (scene/film.cpp filter_table),

@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 // IL BSDF DEI PELI DI HUANG, IN WGSL: la fibra come microfacet, con sezione
 // ellittica. Lo stesso di `src/hair/huangBsdf.ts` dell'applicazione.
 //

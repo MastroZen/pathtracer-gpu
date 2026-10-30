@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { wgslFn, mat3 } from 'three/tsl';
 import { rand1, RNG_INDEX_MIX_SHADER, RNG_INDEX_MIX_SHADER_COUNT } from './random.wgsl.js';
 import {

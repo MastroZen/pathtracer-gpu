@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { wgslFn } from 'three/tsl';
 import { scatterRecordStruct } from './structs.wgsl.js';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';

@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { StructTypeNode } from 'three/webgpu';
 
 // StructTypeNode that force-emits dependency structs. TSL can't discover a struct referenced only via

@@ -19,7 +19,8 @@
   ],
   "files": [
     "src/*",
-    "build/*"
+    "build/*",
+    "NOTICE"
   ],
   "keywords": [
     "webgl",

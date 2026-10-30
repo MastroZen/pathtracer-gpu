@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { wgslFn } from 'three/tsl';
 import { constants, lobeWeightsStruct } from './structs.wgsl.js';
 import { disneyFresnelFunc, getBasisFromNormalFunc, iorToF0Func, schlickFresnelFunc } from './utils.wgsl.js';

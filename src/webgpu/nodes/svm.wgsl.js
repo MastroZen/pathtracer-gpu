@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 // THE NODE MACHINE IN WGSL: the interpreter that runs, at every hit, a program
 // compiled from the texture graph. It is the Shader Virtual Machine of Cycles
 // (kernel/svm/svm.h), and the reason is the same: a program is a buffer, so
@@ -821,7 +822,8 @@ fn svmRun(
 			}
 			case ${ O.BUMP }u: {
 
-				// Blender 5.2 node_bump in tangent space: the height differences in u and v
+				// The Bump node, our own formulation in tangent space (behaviour of Blender 5.2's Bump;
+				// not derived from its GLSL nor from Cycles' svm_node_set_bump): the height differences in u and v
 				// (b.x and f.x, two MATH subtractions), times 1 / (2 step), divided by the
 				// metres one UV unit covers (the u and v columns of the object frame), then
 				// N' = normalize(N - Distance * slope) mixed with N by Strength. Constants:
@@ -841,7 +843,7 @@ fn svmRun(
 			}
 			case ${ O.DISPLACEMENT }u: {
 
-				// Blender 5.2 node_displacement_object in tangent space: (height - midlevel) * scale
+				// The Displacement node as in Cycles' svm_node_displacement (Apache-2.0), in tangent space: (height - midlevel) * scale
 				// along the normal, the luminance of the height. An unlinked or zero Normal is the
 				// flat one. Constants: midlevel, scale
 				let up = vec3f( 0.0, 0.0, 1.0 );

@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { wgslFn } from 'three/tsl';
 
 // THE PHASES OF A VOLUME SCATTER, as Cycles 5.2 writes them (kernel/closure/volume_util.h): Henyey-Greenstein,

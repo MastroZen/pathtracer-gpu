@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { DoubleSide, Matrix4, Ray, Vector3 } from 'three';
 import { MEDIUM_STACK_EMPTY, MEDIUM_STACK_SIZE } from './nodes/mediumStack.wgsl.js';
 

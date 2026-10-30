@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { DataTexture, FloatType, NearestFilter, RedFormat, Vector3 } from 'three';
 import { Matrix3 } from 'three/webgpu';
 import { texture, sampler, uniform } from 'three/tsl';

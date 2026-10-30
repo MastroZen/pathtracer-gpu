@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 // IL BSDF DEI PELI, IN WGSL: i tre lobi di Chiang, gli stessi di
 // `src/hair/hairBsdf.ts` dell'applicazione.
 //

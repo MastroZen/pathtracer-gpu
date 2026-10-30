@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { wgslFn } from 'three/tsl';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { MEDIUM_MAJORANT_FLOOR, MEDIUM_MAX_STEPS, mediumRandFn } from './medium.wgsl.js';

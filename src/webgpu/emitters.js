@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { Matrix4, Vector3, FrontSide, BackSide } from 'three';
 
 // -- EMISSIVE TRIANGLES AS LIGHTS: the table next event estimation samples --

@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 // LA TABELLA DELL'ALBEDO DI UN VETRO GGX: 16x16x16, presa da Cycles.
 //
 // ── A COSA SERVE ──

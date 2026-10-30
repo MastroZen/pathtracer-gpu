@@ -1,3 +1,4 @@
+// THIRD PARTY: contains code derived from Cycles (Apache-2.0), modified. Notices and license: NOTICE
 import { storage, uniform, uniformArray, texture } from 'three/tsl';
 import { StorageBufferAttribute, HalfFloatType, Vector4 } from 'three/webgpu';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
