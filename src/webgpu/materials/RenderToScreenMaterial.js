@@ -1,5 +1,5 @@
-import { MeshBasicNodeMaterial, NoToneMapping, StorageTexture } from 'three/webgpu';
-import { uv, varying, texture, vec4, toneMapping, uniform, wgslFn } from 'three/tsl';
+import { MeshBasicNodeMaterial, NoToneMapping, StorageTexture, CustomBlending, OneFactor, OneMinusSrcAlphaFactor } from 'three/webgpu';
+import { uv, varying, texture, vec4, toneMapping, uniform, wgslFn, materialOpacity } from 'three/tsl';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 
 // TODO: we could fall back to hardware-based filtering if available but it has to be specifically
@@ -137,11 +137,18 @@ export class RenderToScreenNodeMaterial extends MeshBasicNodeMaterial {
 		const toneMappingNode = toneMapping( NoToneMapping, 1.0, getFadedColorFn( texUV ) );
 		this._toneMapping = toneMappingNode;
 
-		// apply alpha _after_ applying tone mapping
-		// NOTE: alpha is being multiplied twice here to accommodate some odd blending in three.js
-		// See mrdoob/three.js#33104. It's possible this should be removed or rethought once fixed.
+		// the accumulation is PREMULTIPLIED, as in Cycles, so it is blended as such: color + destination * ( 1 - alpha ).
+		// The normal blending multiplied the color by the alpha a second time - light in front of a transparent
+		// background (an emitting medium before the void, alpha zero) came out black, and the edge of a scattering
+		// shell at alpha 0.1 ten times too dark. The fade opacity scales color and alpha together, as a premultiplied
+		// color wants
 		this.transparent = true;
-		this.colorNode = vec4( toneMappingNode.rgb, toneMappingNode.a );
+		this.blending = CustomBlending;
+		this.blendSrc = OneFactor;
+		this.blendDst = OneMinusSrcAlphaFactor;
+		this.blendSrcAlpha = OneFactor;
+		this.blendDstAlpha = OneMinusSrcAlphaFactor;
+		this.colorNode = vec4( toneMappingNode.rgb.mul( materialOpacity ), toneMappingNode.a );
 
 		this.setValues( params );
 
