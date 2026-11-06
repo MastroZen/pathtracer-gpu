@@ -2,7 +2,7 @@
 import { ExternalTexture, NearestFilter, NoToneMapping, RenderTarget, UnsignedByteType } from 'three/webgpu';
 import { diffuseColor, mrt, normalView, vec4 } from 'three/tsl';
 
-/** @import { DynamicTileSetting } from 'oidn-web' */
+/** @import { DynamicTileSetting } from 'oidn-webgpu' */
 
 /**
  * Runs Open Image Denoise over a path traced image. Pass one to
@@ -12,7 +12,7 @@ import { diffuseColor, mrt, normalView, vec4 } from 'three/tsl';
  * nor the network files become a dependency.
  *
  * ```js
- * import { initUNetFromURL } from 'oidn-web';
+ * import { initUNetFromURL } from 'oidn-webgpu';
  * pathTracer.setDenoiser( new OIDNDenoiser( { initUNetFromURL, auxWeightsUrl } ) );
  * ```
  *
@@ -67,8 +67,8 @@ export class OIDNDenoiser {
 	 * @param {DynamicTileSetting|null} [options.dynamicTile] - `false` pins every tile to
 	 * `maxTileSize`. An object tunes the adaptive sizing.
 	 * @param {'auto'|'fp16'|'fp32'|null} [options.precision] - The arithmetic of the network, passed to
-	 * oidn-web. `auto` takes half precision when the device has "shader-f16", as the BALANCED quality of
-	 * Cycles does (OIDN fast math); `fp32` is its HIGH quality. Null keeps the oidn-web default.
+	 * oidn-webgpu. `auto` takes half precision when the device has "shader-f16", as the BALANCED quality of
+	 * Cycles does (OIDN fast math); `fp32` is its HIGH quality. Null keeps the oidn-webgpu default.
 	 */
 	constructor( options = {} ) {
 
@@ -84,7 +84,7 @@ export class OIDNDenoiser {
 
 		if ( ! initUNetFromURL ) {
 
-			throw new Error( 'OIDNDenoiser: "initUNetFromURL" from "oidn-web" must be provided.' );
+			throw new Error( 'OIDNDenoiser: "initUNetFromURL" from "oidn-webgpu" must be provided.' );
 
 		}
 
@@ -95,7 +95,7 @@ export class OIDNDenoiser {
 		// `false` falls back to the color only model, which is blurrier but skips a scene render
 		this.useAuxiliaryBuffers = useAuxiliaryBuffers;
 
-		// tiling, passed through to oidn-web. Null keeps its defaults
+		// tiling, passed through to oidn-webgpu. Null keeps its defaults
 		this.maxTileSize = maxTileSize;
 		this.dynamicTile = dynamicTile;
 		this.precision = precision;
@@ -282,6 +282,10 @@ export class OIDNDenoiser {
 
 			// the output is seeded with the raw color, so copying per tile shows a progressive wipe - for a first
 			// pass only: a refresh keeps the previous result until the whole image is done
+			// pace the tiles to display frames, so the path tracer keeps rendering between them: oidn-webgpu 0.5
+			// continues on the event loop by default
+			scheduling: 'animation-frame',
+
 			progress: output => {
 
 				if ( this._progressive ) this._copyOutputToTexture( output, width, height );
@@ -349,7 +353,7 @@ export class OIDNDenoiser {
 
 	}
 
-	// Rasterizes the albedo and normal buffers that guide the filter. oidn-web takes normals
+	// Rasterizes the albedo and normal buffers that guide the filter. oidn-webgpu takes normals
 	// mapped into [0,1], with (0.5, 0.5, 1) as a flat normal.
 	_renderAuxiliaryBuffers( width, height ) {
 
@@ -420,7 +424,7 @@ export class OIDNDenoiser {
 				if ( this.dynamicTile !== null ) options.dynamicTile = this.dynamicTile;
 				if ( this.precision !== null ) options.precision = this.precision;
 
-				return this.initUNetFromURL( url, { device, adapterInfo: device.adapterInfo }, options );
+				return this.initUNetFromURL( url, { device }, options );
 
 			} )();
 
@@ -432,7 +436,7 @@ export class OIDNDenoiser {
 
 	// Copies the denoiser's packed output buffer into a sampleable texture, using a compute pass
 	// since copyBufferToTexture requires 256 byte row alignment.
-	// TODO: remove the copy once oidn-web can write into a caller-provided storage texture.
+	// TODO: remove the copy once oidn-webgpu can write into a caller-provided storage texture.
 	_copyOutputToTexture( output, width, height ) {
 
 		const device = this.renderer.backend.device;
