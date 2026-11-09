@@ -277,42 +277,77 @@ export class OIDNDenoiser {
 		renderer.initTexture( color );
 
 		const { width, height } = color;
-		const inputs = {
-			color: { data: backend.get( color ).texture, width, height },
 
-			// the output is seeded with the raw color, so copying per tile shows a progressive wipe - for a first
-			// pass only: a refresh keeps the previous result until the whole image is done
-			// pace the tiles to display frames, so the path tracer keeps rendering between them: oidn-webgpu 0.5
-			// continues on the event loop by default
-			scheduling: 'animation-frame',
+		// The returned promise settles with the pass: it resolves when the pass completes or is aborted, and
+		// rejects when a tile fails. The tiles run after "tileExecute" returns, so a failure there - a device
+		// loss, a lost buffer - reaches only the "error" callback; without one oidn-webgpu logs it, "running"
+		// stays set, and every later pass waits on it forever.
+		return new Promise( ( resolve, reject ) => {
 
-			progress: output => {
+			const inputs = {
+				color: { data: backend.get( color ).texture, width, height },
 
-				if ( this._progressive ) this._copyOutputToTexture( output, width, height );
+				// the output is seeded with the raw color, so copying per tile shows a progressive wipe - for a first
+				// pass only: a refresh keeps the previous result until the whole image is done
+				// pace the tiles to display frames, so the path tracer keeps rendering between them: oidn-webgpu 0.5
+				// continues on the event loop by default
+				scheduling: 'animation-frame',
 
-			},
-			done: output => {
+				progress: output => {
 
-				this._copyOutputToTexture( output, width, height );
-				this._running = false;
-				this._complete = true;
-				this._abort = null;
-				this.resultTag = this._pendingTag;
+					if ( this._progressive ) this._copyOutputToTexture( output, width, height );
 
-			},
-		};
+				},
+				done: output => {
 
-		// the guided model needs both buffers, and the color only model must not be given them
-		if ( useAux ) {
+					this._copyOutputToTexture( output, width, height );
+					this._running = false;
+					this._complete = true;
+					this._abort = null;
+					this.resultTag = this._pendingTag;
+					resolve();
 
-			renderer.initTexture( albedo );
-			renderer.initTexture( normal );
-			inputs.albedo = { data: backend.get( albedo ).texture, width, height };
-			inputs.normal = { data: backend.get( normal ).texture, width, height };
+				},
+				error: reason => {
 
-		}
+					// a newer pass may own the flags by now
+					if ( requestId === this._requestId ) {
 
-		this._abort = unet.tileExecute( inputs );
+						this._running = false;
+						this._abort = null;
+
+					}
+
+					reject( reason );
+
+				},
+			};
+
+			// the guided model needs both buffers, and the color only model must not be given them
+			if ( useAux ) {
+
+				renderer.initTexture( albedo );
+				renderer.initTexture( normal );
+				inputs.albedo = { data: backend.get( albedo ).texture, width, height };
+				inputs.normal = { data: backend.get( normal ).texture, width, height };
+
+			}
+
+			const abort = unet.tileExecute( inputs );
+			this._abort = () => {
+
+				abort();
+				resolve();
+
+			};
+
+		} ).catch( error => {
+
+			// a synchronous throw from "tileExecute" lands here too
+			if ( requestId === this._requestId ) this._running = false;
+			throw error;
+
+		} );
 
 	}
 
