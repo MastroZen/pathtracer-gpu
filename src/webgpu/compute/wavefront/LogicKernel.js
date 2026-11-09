@@ -19,7 +19,7 @@ import { ENVIRONMENT_LIGHT_TYPE, LIGHT_EPSILON, LIGHT_FAR_DISTANCE, isMISWeightL
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
 import { mediumPhaseFn } from '../../nodes/mediumPhase.wgsl.js';
 import { mediumStackCoefficientsFunc, mediumStackFlagsFunc, mediumStackPhaseFunc, mediumStackPhaseWeightsFunc } from '../../nodes/mediumStack.wgsl.js';
-import { rayDataStruct, intersectionResultStruct, rayQueueAtomicStruct } from './structs.js';
+import { rayDataStruct, intersectionResultStruct, traceQueuedRayStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 
 // Path logic over the persistent slot pool: resolves the previous frame's shadow and bounce trace
@@ -60,7 +60,8 @@ export class LogicKernel extends ComputeKernel {
 			rayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
 			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
 			// the seventh storage buffer: the direct light of a medium segment is queued from here
-			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), rayQueueAtomicStruct ),
+			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), traceQueuedRayStruct ),
+			queueCounters: storage( new StorageBufferAttribute( 1, 1 ), 'uint' ).toAtomic(),
 			// the eighth, and the last of the guaranteed eight: the denoising features of every pixel,
 			// two texels each (albedo, world normal), in the rows of the output target
 			featureStorage: storage( new StorageBufferAttribute( 2, 4 ), 'vec4f' ),
@@ -247,6 +248,7 @@ export class LogicKernel extends ComputeKernel {
 				let rayIntersectionsStorage = &${ params.rayIntersectionsStorage };
 				let shadowRayIntersectionsStorage = &${ params.shadowRayIntersectionsStorage };
 				let shadowRayQueue = &${ params.shadowRayQueue };
+				let queueCounters = &${ params.queueCounters };
 
 				// bound by "rayCount" rather than the pool length. See MaterialKernel
 				let index = globalId.x;
@@ -530,15 +532,15 @@ export class LogicKernel extends ComputeKernel {
 									let direct = throughputColor * sigmaS * directT * pointWeight * phase * lightRec.emission * misWeight / ( lightRec.pdf * choice.y );
 									if ( any( direct > vec3f( 0.0 ) ) ) {
 
-										let shadowIndex = atomicAdd( &shadowRayQueue.length, 1u );
-										shadowRayQueue.elements[ shadowIndex ].origin = directPoint;
-										shadowRayQueue.elements[ shadowIndex ].direction = lightRec.direction;
-										shadowRayQueue.elements[ shadowIndex ].pixelIndex = input.pixelIndex;
-										shadowRayQueue.elements[ shadowIndex ].currentBounce = input.currentBounce;
-										shadowRayQueue.elements[ shadowIndex ].seed = input.seed;
-										shadowRayQueue.elements[ shadowIndex ].alphaDepth = input.alphaDepth;
-										shadowRayQueue.elements[ shadowIndex ].maxDist = lightRec.dist - ${ LIGHT_EPSILON };
-										shadowRayQueue.elements[ shadowIndex ].mediumStack = input.mediumStack;
+										let shadowIndex = atomicAdd( &queueCounters[ ${ SHADOW_RAY_QUEUE_LENGTH }u ], 1u );
+										shadowRayQueue[ shadowIndex ].origin = directPoint;
+										shadowRayQueue[ shadowIndex ].direction = lightRec.direction;
+										shadowRayQueue[ shadowIndex ].pixelIndex = input.pixelIndex;
+										shadowRayQueue[ shadowIndex ].currentBounce = input.currentBounce;
+										shadowRayQueue[ shadowIndex ].seed = input.seed;
+										shadowRayQueue[ shadowIndex ].alphaDepth = input.alphaDepth;
+										shadowRayQueue[ shadowIndex ].maxDist = lightRec.dist - ${ LIGHT_EPSILON };
+										shadowRayQueue[ shadowIndex ].mediumStack = input.mediumStack;
 										rayDataStorage[ index ].mediumShadowIndex = i32( shadowIndex );
 										// the light reaching a scatter is direct at the depth of the scatter
 										rayDataStorage[ index ].mediumDirect = ${ clampPathContributionFunc }( direct, input.currentBounce + 1u, clampDirect, clampIndirect );

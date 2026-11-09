@@ -3,7 +3,7 @@ import { ComputeKernel } from '../ComputeKernel.js';
 import { storage, globalId } from 'three/tsl';
 import { proxy, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit } from '../../nodes/random.wgsl.js';
-import { rayQueueStruct, intersectionResultStruct } from './structs.js';
+import { traceQueuedRayStruct, intersectionResultStruct, RAY_QUEUE_LENGTH } from './structs.js';
 import { hairQueryFn, hairTangentFn, hairSegmentObjectFn, hairSegmentRandomFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 
 // Pure BVH traversal over the queued bounce rays: one thread per queued ray, writing a compact
@@ -15,7 +15,8 @@ export class TraceRayKernel extends ComputeKernel {
 		const params = {
 			bvhData: { value: null },
 
-			rayQueue: storage( new StorageBufferAttribute( 1, 1 ), rayQueueStruct ),
+			rayQueue: storage( new StorageBufferAttribute( 1, 1 ), traceQueuedRayStruct ),
+			queueCounters: storage( new StorageBufferAttribute( 1, 1 ), 'uint' ),
 			rayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
 
 			// ── LA PELURIA, in un buffer solo ──
@@ -39,11 +40,11 @@ export class TraceRayKernel extends ComputeKernel {
 
 			fn compute( globalId: vec3u ) -> void {
 
-				let rayQueue = &${ params.rayQueue };
+				let queueCounters = &${ params.queueCounters };
 				let rayIntersectionsStorage = &${ params.rayIntersectionsStorage };
 
 				let index = globalId.x;
-				if ( index >= rayQueue.length ) {
+				if ( index >= queueCounters[ ${ RAY_QUEUE_LENGTH }u ] ) {
 
 					return;
 
@@ -54,7 +55,7 @@ export class TraceRayKernel extends ComputeKernel {
 				// load made through a let pointer, so Safari refused this kernel with
 				// "no viable conversion from __typeN_Packed". Field reads and writes
 				// through the alias compile, and stay as they are.
-				let queuedRay = ${ params.rayQueue }.elements[ index ];
+				let queuedRay = ${ params.rayQueue }[ index ];
 				let indexUV = vec2u( queuedRay.pixelIndex >> 16, queuedRay.pixelIndex & 0xFFFF );
 				${ rngInit }( indexUV, queuedRay.seed, queuedRay.currentBounce + queuedRay.alphaDepth );
 

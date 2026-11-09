@@ -4,7 +4,7 @@ import { ComputeKernel } from '../ComputeKernel.js';
 import { storage, globalId, uniform } from 'three/tsl';
 import { proxy, proxyFn, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit } from '../../nodes/random.wgsl.js';
-import { rayQueueStruct, intersectionResultStruct } from './structs.js';
+import { traceQueuedRayStruct, intersectionResultStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { chainPassThroughFunc } from '../../nodes/material.wgsl.js';
@@ -39,7 +39,8 @@ export class TraceShadowRayKernel extends ComputeKernel {
 		const params = {
 			bvhData: { value: null },
 
-			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), rayQueueStruct ),
+			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), traceQueuedRayStruct ),
+			queueCounters: storage( new StorageBufferAttribute( 1, 1 ), 'uint' ),
 			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
 
 			// lo stesso pacchetto del kernel di tracciamento: senza, i peli non si fanno
@@ -121,11 +122,11 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 			fn compute( maxMediumCrossings: u32, globalId: vec3u ) -> void {
 
-				let shadowRayQueue = &${ params.shadowRayQueue };
+				let queueCounters = &${ params.queueCounters };
 				let shadowRayIntersectionsStorage = &${ params.shadowRayIntersectionsStorage };
 
 				let index = globalId.x;
-				if ( index >= shadowRayQueue.length ) {
+				if ( index >= queueCounters[ ${ SHADOW_RAY_QUEUE_LENGTH }u ] ) {
 
 					return;
 
@@ -136,7 +137,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 				// load made through a let pointer, so Safari refused this kernel with
 				// "no viable conversion from __typeN_Packed". Field reads and writes
 				// through the alias compile, and stay as they are.
-				let queuedRay = ${ params.shadowRayQueue }.elements[ index ];
+				let queuedRay = ${ params.shadowRayQueue }[ index ];
 				let indexUV = vec2u( queuedRay.pixelIndex >> 16, queuedRay.pixelIndex & 0xFFFF );
 				${ rngInit }( indexUV, queuedRay.seed, queuedRay.currentBounce + queuedRay.alphaDepth );
 
