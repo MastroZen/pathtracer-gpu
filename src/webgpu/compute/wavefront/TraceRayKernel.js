@@ -40,11 +40,10 @@ export class TraceRayKernel extends ComputeKernel {
 
 			fn compute( globalId: vec3u ) -> void {
 
-				let queueCounters = &${ params.queueCounters };
 				let rayIntersectionsStorage = &${ params.rayIntersectionsStorage };
 
 				let index = globalId.x;
-				if ( index >= queueCounters[ ${ RAY_QUEUE_LENGTH }u ] ) {
+				if ( index >= ${ params.queueCounters }[ ${ RAY_QUEUE_LENGTH }u ] ) {
 
 					return;
 

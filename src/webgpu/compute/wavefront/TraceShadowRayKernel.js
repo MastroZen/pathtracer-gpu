@@ -122,11 +122,10 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 			fn compute( maxMediumCrossings: u32, globalId: vec3u ) -> void {
 
-				let queueCounters = &${ params.queueCounters };
 				let shadowRayIntersectionsStorage = &${ params.shadowRayIntersectionsStorage };
 
 				let index = globalId.x;
-				if ( index >= queueCounters[ ${ SHADOW_RAY_QUEUE_LENGTH }u ] ) {
+				if ( index >= ${ params.queueCounters }[ ${ SHADOW_RAY_QUEUE_LENGTH }u ] ) {
 
 					return;
 
