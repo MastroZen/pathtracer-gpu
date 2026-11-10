@@ -72,12 +72,8 @@
     "xatlas-web": "^0.1.0"
   },
   "scripts": {
-    "start": "vite --config ./vite.config.js",
-    "build-examples": "vite build --config ./vite.config.js",
-    "update-screenshots": "node ./scripts/push-screenshots.js",
-    "screenshot-diff": "node ./scripts/regression-test.js",
     "build": "rollup -c",
-    "lint": "eslint \"./src/**/*.{js,ts}\" \"./example/*.js\" && tsc --noEmit",
+    "lint": "eslint \"./src/**/*.{js,ts}\" && tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
   "repository": {
