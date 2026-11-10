@@ -347,7 +347,14 @@ export const subsurfaceSigmaFunc = wgslFn( /* wgsl */ `
 
 `, [] );
 
-export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) => wgslFn( /* wgsl */ `
+// "maps" are the texture slots the materials of the scene fill (a Set of their names), or null for all
+// of them: the block of a slot no material fills is not generated. It was never taken - the slot reads
+// -1 - but a record is loaded whole before the branches, so every slot and its uv transform was read
+// at every hit for nothing
+export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor, maps = null ) => {
+
+	const has = name => maps === null || maps.has( name );
+	return wgslFn( /* wgsl */ `
 
 	fn getSurfaceRecord(
 		material: Material,
@@ -372,7 +379,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 		// ("liveNormal", the relief or the Normal Map of a wired normal pin computed per hit;
 		// a zero vector is none): the same frame either way, so the two paths agree. A live
 		// normal is never zero, its z is: a Normal Map may lie flat on the surface
-		if ( material.normalMap != -1 || dot( liveNormal, liveNormal ) > 0.0 ) {
+		if ( ${ has( 'normalMap' ) ? 'material.normalMap != -1 || ' : '' }dot( liveNormal, liveNormal ) > 0.0 ) {
 
 			// some provided tangents can be malformed (0, 0, 0) causing the normal to be degenerate
 			// resulting in NaNs and slow path tracing.
@@ -385,6 +392,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 				let vTBN = mat3x3f( tangent, bitangent, baseNormal );
 
 				var texNormal = liveNormal;
+				${ has( 'normalMap' ) ? `
 				if ( material.normalMap != -1 ) {
 
 					let uvPrime = material.normalMapTransform * vec3( getUvFromChannel( vertexData, material.normalMap ), 1.0 );
@@ -393,6 +401,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 					texNormal = texNormal * vec3f( material.normalScale, 1.0 );
 
 				}
+				` : '' }
 				normal = normalize( vTBN * texNormal );
 
 			}
@@ -412,21 +421,26 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 
 		}
 
+		${ has( 'map' ) ? `
 		if ( material.map != -1 ) {
 
 			let uvPrime = material.mapTransform * vec3f( getUvFromChannel( vertexData, material.map ), 1 );
 			albedo *= sampleTexel( uvPrime.xy, material.map, 0 );
 
 		}
+		` : '' }
 
+		${ has( 'alphaMap' ) ? `
 		if ( material.alphaMap != -1 ) {
 
 			let uvPrime = material.alphaMapTransform * vec3f( getUvFromChannel( vertexData, material.alphaMap ), 1 );
 			albedo.a *= sampleTexel( uvPrime.xy, material.alphaMap, 0 ).g;
 
 		}
+		` : '' }
 
 		var roughness = material.roughness;
+		${ has( 'roughnessMap' ) ? `
 		if ( material.roughnessMap != -1 ) {
 
 			let uvPrime = material.roughnessMapTransform * vec3f( getUvFromChannel( vertexData, material.roughnessMap ), 1 );
@@ -434,8 +448,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			roughness *= texColor.g;
 
 		}
+		` : '' }
 
 		var metalness = material.metalness;
+		${ has( 'metalnessMap' ) ? `
 		if ( material.metalnessMap != -1 ) {
 
 			let uvPrime = material.metalnessMapTransform * vec3f( getUvFromChannel( vertexData, material.metalnessMap ), 1 );
@@ -443,8 +459,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			metalness *= texColor.b;
 
 		}
+		` : '' }
 
 		var emission = material.emissiveIntensity * material.emissive;
+		${ has( 'emissiveMap' ) ? `
 		if ( material.emissiveMap != -1 ) {
 
 			let uvPrime = material.emissiveMapTransform * vec3f( getUvFromChannel( vertexData, material.emissiveMap ), 1 );
@@ -452,8 +470,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			emission *= texColor.rgb;
 
 		}
+		` : '' }
 
 		var transmission = material.transmission;
+		${ has( 'transmissionMap' ) ? `
 		if ( material.transmissionMap != -1 ) {
 
 			let uvPrime = material.transmissionMapTransform * vec3f( getUvFromChannel( vertexData, material.transmissionMap ), 1 );
@@ -461,8 +481,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			transmission *= texColor.r;
 
 		}
+		` : '' }
 
 		var clearcoat = material.clearcoat;
+		${ has( 'clearcoatMap' ) ? `
 		if ( material.clearcoatMap != -1 ) {
 
 			let uvPrime = material.clearcoatMapTransform * vec3f( getUvFromChannel( vertexData, material.clearcoatMap ), 1 );
@@ -470,8 +492,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			clearcoat *= texColor.r;
 
 		}
+		` : '' }
 
 		var clearcoatRoughness = material.clearcoatRoughness;
+		${ has( 'clearcoatRoughnessMap' ) ? `
 		if ( material.clearcoatRoughnessMap != -1 ) {
 
 			let uvPrime = material.clearcoatRoughnessMapTransform * vec3f( getUvFromChannel( vertexData, material.clearcoatRoughnessMap ), 1 );
@@ -479,8 +503,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			clearcoatRoughness *= texColor.g;
 
 		}
+		` : '' }
 
 		var clearcoatNormal = baseNormal;
+		${ has( 'clearcoatNormalMap' ) ? `
 		if ( material.clearcoatNormalMap != -1 ) {
 
 			// some provided tangents can be malformed (0, 0, 0) causing the normal to be degenerate
@@ -502,6 +528,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			}
 
 		}
+		` : '' }
 
 		clearcoatNormal *= side;
 
@@ -510,6 +537,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 		clearcoatNormal = ensureValidReflectionNormal( clearcoatNormal, faceNormal, view );
 
 		var sheenColor = material.sheenColor;
+		${ has( 'sheenColorMap' ) ? `
 		if ( material.sheenColorMap != -1 ) {
 
 			let uvPrime = material.sheenColorMapTransform * vec3f( getUvFromChannel( vertexData, material.sheenColorMap ), 1 );
@@ -517,8 +545,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			sheenColor *= texColor.rgb;
 
 		}
+		` : '' }
 
 		var sheenRoughness = material.sheenRoughness;
+		${ has( 'sheenRoughnessMap' ) ? `
 		if ( material.sheenRoughnessMap != -1 ) {
 
 			let uvPrime = material.sheenRoughnessMapTransform * vec3f( getUvFromChannel( vertexData, material.sheenRoughnessMap ), 1 );
@@ -526,8 +556,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			sheenRoughness *= texColor.r;
 
 		}
+		` : '' }
 
 		var iridescence = material.iridescence;
+		${ has( 'iridescenceMap' ) ? `
 		if ( material.iridescenceMap != -1 ) {
 
 			let uvPrime = material.iridescenceMapTransform * vec3f( getUvFromChannel( vertexData, material.iridescenceMap ), 1 );
@@ -535,8 +567,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			iridescence *= texColor.r;
 
 		}
+		` : '' }
 
 		var iridescenceThickness = material.iridescenceThicknessMaximum;
+		${ has( 'iridescenceThicknessMap' ) ? `
 		if ( material.iridescenceThicknessMap != -1 ) {
 
 			let uvPrime = material.iridescenceThicknessMapTransform * vec3f( getUvFromChannel( vertexData, material.iridescenceThicknessMap ), 1 );
@@ -549,8 +583,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			);
 
 		}
+		` : '' }
 
 		var specularColor = material.specularColor;
+		${ has( 'specularColorMap' ) ? `
 		if ( material.specularColorMap != -1 ) {
 
 			let uvPrime = material.specularColorMapTransform * vec3f( getUvFromChannel( vertexData, material.specularColorMap ), 1 );
@@ -558,8 +594,10 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			specularColor *= texColor.rgb;
 
 		}
+		` : '' }
 
 		var specularIntensity = material.specularIntensity;
+		${ has( 'specularIntensityMap' ) ? `
 		if ( material.specularIntensityMap != -1 ) {
 
 			let uvPrime = material.specularIntensityMapTransform * vec3f( getUvFromChannel( vertexData, material.specularIntensityMap ), 1 );
@@ -567,9 +605,11 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			specularIntensity *= texColor.a;
 
 		}
+		` : '' }
 
 		// extract the anisotropy magnitude vector in tangent space
 		var anisotropyDirVec = material.anisotropy * vec2f( cos( material.anisotropyRotation ), sin( material.anisotropyRotation ) );
+		${ has( 'anisotropyMap' ) ? `
 		if ( material.anisotropyMap != -1 ) {
 
 			let uvPrime = material.anisotropyMapTransform * vec3f( getUvFromChannel( vertexData, material.anisotropyMap ), 1.0 );
@@ -589,6 +629,7 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 			}
 
 		}
+		` : '' }
 
 		// adjust the surface basis to be oriented along the anisotropic vector
 		let anisotropyStrength = length( anisotropyDirVec );
@@ -684,6 +725,8 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor ) 
 	ensureValidReflectionNormal,
 	ensureValidViewNormal,
 ] );
+
+};
 
 /*
  *

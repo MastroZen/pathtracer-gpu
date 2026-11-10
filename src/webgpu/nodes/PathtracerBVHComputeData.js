@@ -1,11 +1,11 @@
 import { BufferAttribute, BufferGeometry, StorageBufferAttribute, StructTypeNode, Vector4, SkinnedMesh, RepeatWrapping, ClampToEdgeWrapping, MirroredRepeatWrapping, NearestFilter, DataTexture, RedIntegerFormat, UnsignedIntType } from 'three/webgpu';
-import { BVHComputeData, intersectRayTriangle, bvhNodeBoundsStruct, bvhNodeStruct, rayStruct, rayIntersectionResultStruct as intersectionResultStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
-import { storage, float, texture, uniformArray, uint } from 'three/tsl';
+import { BVHComputeData, intersectRayTriangle, bvhNodeBoundsStruct, bvhNodeStruct, rayStruct, rayIntersectionResultStruct as intersectionResultStruct, wgslTagCode, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { storage, float, texture, uniformArray, uint, vec3 } from 'three/tsl';
 import { SkinnedMeshBVH, MeshBVH, SAH } from 'three-mesh-bvh';
 import { materialStruct } from './structs.wgsl.js';
 import { getTextureHash } from '../../core/utils/sceneUpdateUtils.js';
 import { sampleTexelFunc } from './utils.wgsl.js';
-import { getSurfaceRecordFunc } from './material.wgsl.js';
+import { chainPassThroughFunc, getSurfaceRecordFunc } from './material.wgsl.js';
 import { AtlasTexture } from '../AtlasTexture.js';
 import { materialSideValue } from '../emitters.js';
 import { packSvmPrograms, svmRunFn, SVM_REGISTER_BUCKETS } from './svm.wgsl.js';
@@ -90,6 +90,17 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		// how many chains a shadow ray must run the weights program of: zero, and the shadow kernel is
 		// built without the interpreter for them
 		this.svmShadowMixes = 0;
+		// THE KERNEL FEATURES the materials ask for (compute/wavefront/MaterialKernel.js): how many have a
+		// participating medium, a subsurface weight, the Huang hair model. At zero the kernels are
+		// generated without that code
+		this.mediumMaterials = 0;
+		this.subsurfaceMaterials = 0;
+		this.huangMaterials = 0;
+		// the texture slots the materials fill, by name: getSurfaceRecord is generated with those alone
+		// (nodes/material.wgsl.js). "surfaceVersion" moves when the set changes and the function is rebuilt,
+		// so whoever compiled the old one knows
+		this.materialMaps = new Set();
+		this.surfaceVersion = 0;
 
 	}
 
@@ -301,27 +312,53 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 		// getSurfaceRecord shares the same sampleTexel, so the surface shading and
 		// the transparency raycast resolve to one textureInfo binding per pipeline
-		fns.getSurfaceRecord = getSurfaceRecordFunc( sampleTexel, fns.getUvFromChannel, fns.getColor );
+		this._buildSurfaceRecord = () => {
+
+			fns.getSurfaceRecord = getSurfaceRecordFunc( sampleTexel, fns.getUvFromChannel, fns.getColor, this.materialMaps );
+
+		};
+		this._buildSurfaceRecord();
 
 		// raycast first hit, bounded by the ray's "maxDist" - 0 means unbounded
 		const currentMaterialIndex = uint().toVar( 'bvh_materialIndex' );
 		const scratchRayScalar = float( 1.0 ).toVar( 'bvh_rayScalar' );
 		const baseOpacityScalar = float( 1.0 ).toVar( 'bvh_baseOpacity' );
+		// what the surfaces a shadow ray passed let through, gathered by its traversal: an alpha, a
+		// Transparent BSDF. A product, so the order the traversal meets them in does not matter
+		const shadowThrough = vec3( 1.0 ).toVar( 'bvh_shadowThrough' );
+		this.shadowThrough = shadowThrough;
+		const chainPassThroughFn = chainPassThroughFunc( storage.materials );
 
-		fns.raycastFirstHit = this.getShapecastFn( {
-			name: 'raycastFirstHit',
+		// TWO TRAVERSALS from one description: the first hit of a path segment, and the one of a shadow
+		// ray, which only asks whether something is in the way (TraceShadowRayKernel.js). It stops at the
+		// first OPAQUE triangle it accepts - from there its bounds test refuses every node - and passes
+		// the ones that let light through, gathering their tint. Their helpers carry a suffix, so a shader
+		// that held both would not declare a function twice
+		const raycastFn = ( name, anyHit ) => {
+
+		const S = anyHit ? 'Shadow' : '';
+		return this.getShapecastFn( {
+			name,
+			// a shadow ray starts with nothing gathered
+			prefixFn: anyHit ? wgslTagFn/* wgsl */`
+				fn resetShadowThrough() -> void {
+
+					${ shadowThrough } = vec3f( 1.0 );
+
+				}
+			` : null,
 			shapeStruct: rayStruct,
 			resultStruct: intersectionResultStruct,
 
 			boundsOrderFn: wgslTagFn/* wgsl */`
-				fn getBoundsOrder( ray: ${ rayStruct }, splitAxis: u32, node: ${ bvhNodeStruct } ) -> bool {
+				fn getBoundsOrder${ S }( ray: ${ rayStruct }, splitAxis: u32, node: ${ bvhNodeStruct } ) -> bool {
 
 					return ray.direction[ splitAxis ] >= 0.0;
 
 				}
 			`,
 			intersectsBoundsFn: wgslTagFn/* wgsl */`
-				fn rayIntersectsBounds( ray: ${ rayStruct }, bounds: ${ bvhNodeBoundsStruct }, result: ptr<function, ${ intersectionResultStruct }> ) -> u32 {
+				fn rayIntersectsBounds${ S }( ray: ${ rayStruct }, bounds: ${ bvhNodeBoundsStruct }, result: ptr<function, ${ intersectionResultStruct }> ) -> u32 {
 
 					// early-out if our object is completely transparent
 					if ( ${ baseOpacityScalar } == 0.0 ) {
@@ -330,15 +367,29 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 					}
 
+					// a shadow ray that found its occluder refuses every node left: the stack drains without
+					// testing anything else, which is how the traversal ends early
+					${ anyHit ? 'if ( result.didHit ) { return 0u; }' : '' }
+
 					let boundsMin = vec3( bounds.min[0], bounds.min[1], bounds.min[2] );
 					let boundsMax = vec3( bounds.max[0], bounds.max[1], bounds.max[2] );
 
-					let invDir = 1.0 / ray.direction;
+					// a ray parallel to a slab and outside it misses; on its boundary 0 * infinity would be a NaN,
+					// as three-mesh-bvh guards its own ray test
+					let parallel = ray.direction == vec3f( 0.0 );
+					if ( any( parallel & ( ( ray.origin < boundsMin ) | ( ray.origin > boundsMax ) ) ) ) {
+
+						return 0u;
+
+					}
+
+					let invDir = 1.0 / select( ray.direction, vec3f( 1.0 ), parallel );
 					let tMinPlane = ( boundsMin - ray.origin ) * invDir;
 					let tMaxPlane = ( boundsMax - ray.origin ) * invDir;
 
-					let tMinHit = min( tMinPlane, tMaxPlane );
-					let tMaxHit = max( tMinPlane, tMaxPlane );
+					// a parallel axis never limits the interval
+					let tMinHit = select( min( tMinPlane, tMaxPlane ), vec3f( - 3.402823e38 ), parallel );
+					let tMaxHit = select( max( tMinPlane, tMaxPlane ), vec3f( 3.402823e38 ), parallel );
 
 					let t0 = max( max( tMinHit.x, tMinHit.y ), tMinHit.z );
 					let t1 = min( min( tMaxHit.x, tMaxHit.y ), tMaxHit.z );
@@ -366,7 +417,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			`,
 			intersectRangeFn: wgslTagFn/* wgsl */`
-				fn intersectRange( ray: ${ rayStruct }, offset: u32, count: u32, result: ptr<function, ${ intersectionResultStruct }> ) -> bool {
+				fn intersectRange${ S }( ray: ${ rayStruct }, offset: u32, count: u32, result: ptr<function, ${ intersectionResultStruct }> ) -> bool {
 
 					var didHit = false;
 					for ( var ti = offset; ti < offset + count; ti = ti + 1u ) {
@@ -452,6 +503,18 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 							}
 
+							${ anyHit ? wgslTagCode/* wgsl */`
+							// a surface that lets light through does not stop a shadow ray: it tints what passes, with the
+							// expected pass of its chain (chainPassThrough), and the traversal carries on to the next
+							let passes = ${ chainPassThroughFn }( ${ currentMaterialIndex }, false, vec4f( 0.0 ), vec4f( 0.0 ) );
+							if ( any( passes > vec3f( 0.0 ) ) ) {
+
+								${ shadowThrough } *= passes;
+								continue;
+
+							}
+							` : '' }
+
 							result.didHit = true;
 							result.dist = triResult.dist;
 							result.normal = triResult.normal;
@@ -460,6 +523,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 							result.indices = vec4u( i0, i1, i2, ti );
 
 							didHit = true;
+							${ anyHit ? 'return true;' : '' }
 
 						}
 
@@ -470,7 +534,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 				}
 			`,
 			transformShapeFn: wgslTagFn/* wgsl */`
-				fn transformRay( ray: ptr<function, ${ rayStruct }>, objectIndex: u32 ) -> void {
+				fn transformRay${ S }( ray: ptr<function, ${ rayStruct }>, objectIndex: u32 ) -> void {
 
 					let toLocal = ${ storage.transforms }[ objectIndex ].inverseMatrixWorld;
 					ray.origin = ( toLocal * vec4f( ray.origin, 1.0 ) ).xyz;
@@ -497,7 +561,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 				}
 			`,
 			transformResultFn: wgslTagFn/* wgsl */`
-				fn transformResult( hit: ptr<function, ${ intersectionResultStruct }>, objectIndex: u32 ) -> void {
+				fn transformResult${ S }( hit: ptr<function, ${ intersectionResultStruct }>, objectIndex: u32 ) -> void {
 
 					let toLocal = ${ storage.transforms }[ objectIndex ].inverseMatrixWorld;
 					hit.normal = normalize( ( transpose( toLocal ) * vec4f( hit.normal, 0.0 ) ).xyz );
@@ -506,7 +570,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 				}
 			`,
 			resetShapeFn: wgslTagFn/* wgsl */`
-				fn resetRayScalar( objectIndex: u32 ) -> void {
+				fn resetRayScalar${ S }( objectIndex: u32 ) -> void {
 
 					${ scratchRayScalar } = 1.0;
 					${ baseOpacityScalar } = 1.0;
@@ -514,6 +578,10 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 				}
 			`,
 		} );
+
+		};
+		fns.raycastFirstHit = raycastFn( 'raycastFirstHit', false );
+		fns.raycastShadow = raycastFn( 'raycastShadow', true );
 
 	}
 
@@ -650,7 +718,26 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		this.updateMaterialsMap();
 
 		const { materials, storage, structs, bvh } = this;
-		const { materialData, textures, svmWords, svmRegisters, svmResolved, svmMediums, svmShadowMixes } = this.writeMaterialsBuffer( materials );
+		const {
+			materialData, textures, svmWords, svmRegisters, svmResolved, svmMediums, svmShadowMixes,
+			mediumMaterials, subsurfaceMaterials, huangMaterials, materialMaps,
+		} = this.writeMaterialsBuffer( materials );
+		// a slot that appeared or emptied regenerates the surface function, when there is one already
+		const mapsKey = [ ...materialMaps ].sort().join( ' ' );
+		if ( mapsKey !== [ ...this.materialMaps ].sort().join( ' ' ) ) {
+
+			this.materialMaps = materialMaps;
+			if ( this._buildSurfaceRecord ) {
+
+				this._buildSurfaceRecord();
+				this.surfaceVersion ++;
+
+			}
+
+		}
+		this.mediumMaterials = mediumMaterials;
+		this.subsurfaceMaterials = subsurfaceMaterials;
+		this.huangMaterials = huangMaterials;
 		this.svmShadowMixes = svmShadowMixes;
 		this.svmMediums = svmMediums;
 		this.svmRegisters = svmRegisters;
@@ -745,6 +832,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			if ( key in material && material[ key ] ) {
 
+				materialMaps.add( key );
 				return textureWord( material[ key ] );
 
 			} else {
@@ -839,6 +927,10 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 		let svmResolved = 0;
 		let svmMediums = 0;
 		let svmShadowMixes = 0;
+		let mediumMaterials = 0;
+		let subsurfaceMaterials = 0;
+		let huangMaterials = 0;
+		const materialMaps = new Set();
 		// THE GRIDS of the fluid domains, appended to the program words as a float's bits: the material
 		// kernel binds the eight storage buffers a device guarantees, and the words are a texture
 		const gridChunks = [];
@@ -1145,6 +1237,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 
 			// Subsurface - offset 279
 			floatArray[ index ++ ] = getField( m, 'subsurfaceWeight', 0.0 );
+			if ( getField( m, 'subsurfaceWeight', 0.0 ) > 0.0 ) subsurfaceMaterials ++;
 
 			// offset 280: the radius is a Color so the three channels can differ, and it
 			// arrives already multiplied by the scale - the kernel wants a distance
@@ -1168,6 +1261,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			floatArray[ index ++ ] = getField( m, 'hairIor', 1.55 );
 
 			floatArray[ index ++ ] = getField( m, 'hairModel', 0.0 );
+			if ( getField( m, 'hairModel', 0.0 ) > 0.5 ) huangMaterials ++;
 			floatArray[ index ++ ] = getField( m, 'hairAspect', 0.85 );
 
 			// COME SI DA' IL COLORE: 0 riflettanza (il default, cioe' il comportamento
@@ -1255,6 +1349,7 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			// a domain's grid makes the medium heterogeneous too, with or without a program
 			const grid = medium?.grid ?? null;
 			if ( medium && ( mediumPlace || grid ) ) svmMediums ++;
+			if ( medium ) mediumMaterials ++;
 			// bits 3 and 4: the material's Volume Sampling - Distance, or Equiangular alone; neither is
 			// Multiple Importance, the default
 			// bits 8-10: how many LEAVES of the volume follow this record in the list (the app's withParts)
@@ -1314,7 +1409,10 @@ export class PathtracerBVHComputeData extends BVHComputeData {
 			for ( const chunk of gridChunks ) { svmWords.set( chunk, at ); at += chunk.length; }
 
 		}
-		return { materialData: intArray, textures, svmWords, svmRegisters: svm.registers, svmResolved, svmMediums, svmShadowMixes };
+		return {
+			materialData: intArray, textures, svmWords, svmRegisters: svm.registers, svmResolved, svmMediums, svmShadowMixes,
+			mediumMaterials, subsurfaceMaterials, huangMaterials, materialMaps,
+		};
 
 	}
 

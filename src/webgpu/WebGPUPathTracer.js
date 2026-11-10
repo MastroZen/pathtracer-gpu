@@ -184,6 +184,17 @@ export class WebGPUPathTracer {
 	}
 
 	/**
+	 * The most path slots one update can advance, whatever the frame budget asks: the size of the pool.
+	 * @type {number}
+	 * @readonly
+	 */
+	get maxPathsPerUpdate() {
+
+		return this._pathTracer.maxPathsPerUpdate ?? Infinity;
+
+	}
+
+	/**
 	 * Number of path slots dispatched per {@link WebGPUPathTracer#renderSample} call,
 	 * independent of resolution. Raising it trades frame rate for convergence speed.
 	 * @type {number}
@@ -653,6 +664,16 @@ export class WebGPUPathTracer {
 		 * @default 1
 		 */
 		this.lowResSamples = 1;
+
+		/**
+		 * Path tracing updates per frame at full resolution. One update advances every path slot by one
+		 * bounce, and the slots are capped by the pool ({@link WebGPUPathTracer#maxPathsPerUpdate}): on a
+		 * device that finishes an update in a fraction of the frame, the host raises this to fill the frame
+		 * instead of leaving the GPU idle until the next one.
+		 * @type {number}
+		 * @default 1
+		 */
+		this.updatesPerFrame = 1;
 
 		/**
 		 * The host says the user is navigating, as Cycles keeps the low resolution preview while the view changes
@@ -1358,7 +1379,7 @@ export class WebGPUPathTracer {
 		if ( ! this.pause && ( ! lowResMode || ( lowResMode && dynamicLowRes ) ) ) {
 
 			pathTracer.lowResMode = lowResMode;
-			const updates = lowResMode && dynamicLowRes ? Math.max( 1, this.lowResSamples ) : 1;
+			const updates = lowResMode && dynamicLowRes ? Math.max( 1, this.lowResSamples ) : Math.max( 1, Math.floor( this.updatesPerFrame ) );
 			for ( let i = 0; i < updates; i ++ ) pathTracer.update();
 
 		}

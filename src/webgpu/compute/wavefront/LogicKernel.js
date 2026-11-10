@@ -2,7 +2,7 @@
 import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, storage, textureStore, globalId } from 'three/tsl';
-import { proxy, proxyFn, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { proxy, proxyFn, wgslTagCode, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { misHeuristicFn, accumulateSampleFn } from '../../nodes/sampling.wgsl.js';
 import { clampPathContributionFunc, isTerminatingScatterFunc } from '../../nodes/utils.wgsl.js';
 import { TRANSMISSIVE_BACKGROUND_ENVIRONMENT, TRANSMISSIVE_BACKGROUND_OVERLAY, TRANSMISSIVE_BACKGROUND_TRANSPARENT } from '../../constants.js';
@@ -20,12 +20,32 @@ import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl
 import { mediumPhaseFn } from '../../nodes/mediumPhase.wgsl.js';
 import { mediumStackCoefficientsFunc, mediumStackFlagsFunc, mediumStackPhaseFunc, mediumStackPhaseWeightsFunc } from '../../nodes/mediumStack.wgsl.js';
 import { rayDataStruct, intersectionResultStruct, traceQueuedRayStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
+import { NO_KERNEL_FEATURES, kernelFeaturesKey } from './kernelFeatures.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 
 // Path logic over the persistent slot pool: resolves the previous frame's shadow and bounce trace
 // results, accumulates emission and NEE / forward MIS contributions, terminates finished paths into
 // the output, and samples the next NEE light for MaterialKernel. Touches no BVH data.
 export class LogicKernel extends ComputeKernel {
+
+	// The features the kernel is built for (MaterialKernel.js): here only the medium counts, so a
+	// coat or a subsurface that comes and goes does not regenerate this kernel
+	setFeatures( features ) {
+
+		const own = { ...NO_KERNEL_FEATURES, medium: features.medium };
+		const key = kernelFeaturesKey( own );
+		if ( key === this.featuresKey ) {
+
+			return false;
+
+		}
+
+		this.featuresKey = key;
+		this._fn = this._buildFn( own );
+		this.setWorkgroupSize( ...this.workgroupSize );
+		return true;
+
+	}
 
 	constructor( ) {
 
@@ -228,7 +248,11 @@ export class LogicKernel extends ComputeKernel {
 			}
 		`;
 
-		const fn = wgslTagFn/* wgsl */`
+		// only the medium is a feature of this kernel: hair and subsurface are shaded by MaterialKernel
+		const build = features => {
+
+			const MEDIUM = features.medium;
+			return wgslTagFn/* wgsl */`
 
 			fn compute(
 				// settings
@@ -307,6 +331,7 @@ export class LogicKernel extends ComputeKernel {
 
 				// and the direct light of the medium segment traced last frame, queued by this kernel
 				// with its whole weight: the shadow brings what the media on its way let through
+				${ MEDIUM ? wgslTagCode/* wgsl */`
 				if ( input.mediumShadowIndex >= 0 ) {
 
 					let mediumHit = ${ params.shadowRayIntersectionsStorage }[ u32( input.mediumShadowIndex ) ];
@@ -318,6 +343,7 @@ export class LogicKernel extends ComputeKernel {
 
 				}
 				rayDataStorage[ index ].mediumShadowIndex = - 1;
+				` : '' }
 
 				// ── THE CLAMP DEPTH, as in Cycles (film/light_passes.h) ──
 				//
@@ -369,6 +395,7 @@ export class LogicKernel extends ComputeKernel {
 					// the app). The media are the path's STACK, summed as Cycles sums the closures of
 					// every entry; a subsurface walk integrates its own volume, and the media around
 					// it wait for the path to leave it, as there
+					${ MEDIUM ? wgslTagCode/* wgsl */`
 					let stackInfo = select( vec2u( 0u ), ${ stackFlagsFn }( input.mediumStack ), input.insideMaterial < 0 );
 					let mediumFlags = stackInfo.x;
 					// a stack with a HETEROGENEOUS medium was walked by VolumeKernel before this
@@ -589,6 +616,7 @@ export class LogicKernel extends ComputeKernel {
 						}
 
 					}
+					` : 'const heterogeneous = false; const inMedium = false; const mediumScatter = false; let mediumEnd = surfaceDist;' }
 
 					// the NEE choice as it was made at the vertex this segment left: what a light found by
 					// the segment is weighed against
@@ -619,20 +647,24 @@ export class LogicKernel extends ComputeKernel {
 							// seen through the medium: its transmittance, over the probability of the
 							// draw getting this far when there was one
 							var mediumFactor = vec3f( 1.0 );
+							${ MEDIUM ? wgslTagCode/* wgsl */`
 							if ( inMedium ) {
 
 								let transmittance = exp( - sigmaT * lightRec.dist );
 								mediumFactor = select( transmittance, transmittance / max( dot( channelP, transmittance ), 1e-9 ), mediumSampled );
 
 							}
+							` : '' }
 							lightHits += ${ clampPathContributionFunc }( lightRec.emission * throughputColor * misWeight * mediumFactor, input.currentBounce, clampDirect, clampIndirect );
 
 						}
 
 					}
 
+					${ MEDIUM ? wgslTagCode/* wgsl */`
 					throughputColor *= mediumWeight;
 					rayDataStorage[ index ].mediumScatter = select( 0u, 1u, mediumScatter );
+					` : '' }
 					// the vertex the next light is chosen from: the surface, or the scatter point
 					let vertexPosition = select( hitResult.position, input.origin + input.direction * mediumEnd, mediumScatter );
 
@@ -839,8 +871,13 @@ export class LogicKernel extends ComputeKernel {
 
 			}
 		`;
+		
+		};
 
-		super( fn( params ) );
+		super( build( NO_KERNEL_FEATURES )( params ) );
+
+		this.featuresKey = kernelFeaturesKey( { ...NO_KERNEL_FEATURES } );
+		this._buildFn = features => build( features )( params );
 
 		this.defineUniformAccessors( params );
 

@@ -38,6 +38,9 @@ export class PathTracerBackend {
 		// Nasce VUOTO: uno storage buffer va sempre legato, e otto parole a zero dicono
 		// alla traversata «nessun nodo».
 		this.hairAttribute = new StorageBufferAttribute( EMPTY_HAIR_DATA, 1 );
+		// whether a coat is bound at all: without one no hit is a curve, and the kernels are generated
+		// without the hair code (compute/wavefront/MaterialKernel.js, the kernel features)
+		this.hasFur = false;
 		this.lowResMode = false;
 
 		// stop taking samples once a pixel reaches this count. zero means no limit.
@@ -89,6 +92,7 @@ export class PathTracerBackend {
 	setFur( packed ) {
 
 		const data = packed === null ? EMPTY_HAIR_DATA : packed;
+		this.hasFur = packed !== null;
 		const previous = this.hairAttribute;
 
 		// ── THE SAME SIZE MEANS THE SAME BUFFER ──

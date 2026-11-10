@@ -3,7 +3,7 @@ import { Vector2, Vector4 } from 'three';
 import { StorageBufferAttribute, StorageTexture } from 'three/webgpu';
 import { ComputeKernel } from '../ComputeKernel.js';
 import { uniform, uniformArray, storage, textureStore, globalId } from 'three/tsl';
-import { proxy, proxyFn, rayStruct, wgslTagFn } from 'three-mesh-bvh/webgpu';
+import { proxy, proxyFn, rayStruct, wgslTagCode, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { mediumPhaseFn, mediumPhaseSampleFn } from '../../nodes/mediumPhase.wgsl.js';
 import { mediumStackEnterFunc, mediumStackExitFunc, mediumStackPhaseFunc, mediumStackPickPhaseFunc } from '../../nodes/mediumStack.wgsl.js';
 import { rngInit, rand1, rand2, rand3, RNG_INDEX_RAY_JITTER, RNG_INDEX_ALPHA_TEST, RNG_INDEX_RUSSIAN_ROULETTE, RNG_INDEX_DISPERSION_WAVELENGTH, RNG_INDEX_SUBSURFACE, RNG_INDEX_SUBSURFACE_WALK, RNG_INDEX_HAIR, RNG_INDEX_MEDIUM_PHASE } from '../../nodes/random.wgsl.js';
@@ -22,6 +22,7 @@ import { GGX_GLASS_E, ggxGlassEFn } from '../../nodes/ggxGlassTable.wgsl.js';
 import { svmRecordTexelFn, svmResultsTexture } from './SvmKernel.js';
 import { PIXEL_FILTER_TABLE_SIZE, pixelFilterReadFunc } from '../../nodes/pixelFilter.wgsl.js';
 import { directionalAlbedoSheenFunc } from '../../nodes/sheen.wgsl.js';
+import { NO_KERNEL_FEATURES, kernelFeaturesKey } from './kernelFeatures.js';
 
 // How many null boundaries of participating media one path may cross. They advance the alpha
 // depth, so the next draws are not the ones the boundary hit already used, but they are not
@@ -32,6 +33,24 @@ const MEDIUM_BOUNDS_MAX = 128;
 // fresh camera ray; live slots evaluate the surface staged by LogicKernel, sample the bsdf, and
 // enqueue the next bounce ray plus the NEE shadow ray toward the light LogicKernel selected.
 export class MaterialKernel extends ComputeKernel {
+
+	// The features the kernel is built for. A new set regenerates the shader over the SAME parameter
+	// nodes, so every uniform and binding set on the kernel survives. Returns whether it changed
+	setFeatures( features ) {
+
+		const key = kernelFeaturesKey( features );
+		if ( key === this.featuresKey ) {
+
+			return false;
+
+		}
+
+		this.featuresKey = key;
+		this._fn = this._buildFn( features );
+		this.setWorkgroupSize( ...this.workgroupSize );
+		return true;
+
+	}
 
 	constructor( ) {
 
@@ -113,7 +132,13 @@ export class MaterialKernel extends ComputeKernel {
 
 		const pixelFilterReadFn = pixelFilterReadFunc( params.pixelFilterTable );
 
-		const fn = wgslTagFn/* wgsl */`
+		const build = features => {
+
+			const HAIR = features.hair;
+			const HUANG = features.hair && features.huang;
+			const MEDIUM = features.medium;
+			const SSS = features.subsurface;
+			return wgslTagFn/* wgsl */`
 
 			fn compute(
 				seed: u32,
@@ -272,7 +297,7 @@ export class MaterialKernel extends ComputeKernel {
 
 					// the path is walking a subsurface volume; the media it is inside of are its stack,
 					// which every shadow ray from here starts with
-					let inSubsurface = input.insideMaterial >= 0;
+					${ SSS ? 'let inSubsurface = input.insideMaterial >= 0;' : 'const inSubsurface = false;' }
 
 					// -- A SCATTER INSIDE THE MEDIUM, at the point LogicKernel chose --
 					//
@@ -282,6 +307,7 @@ export class MaterialKernel extends ComputeKernel {
 					// path ends after the direct light, and that light takes the whole weight since no
 					// bounce will find it from here - Cycles keeps the ray going through transparent
 					// stuff only, which gathers the same light in expectation.
+					${ MEDIUM ? wgslTagCode/* wgsl */`
 					if ( input.mediumScatter == 1u ) {
 
 						// the phase of the point is the MIXTURE of the stack's, on the weights the scatter
@@ -362,6 +388,7 @@ export class MaterialKernel extends ComputeKernel {
 						return;
 
 					}
+					` : '' }
 
 					// ── SUBSURFACE: THE WALK INSIDE THE VOLUME ──
 					//
@@ -407,6 +434,7 @@ export class MaterialKernel extends ComputeKernel {
 					// on a remap that was wrong. With the remap read from the source instead of
 					// memory the gain evaporated, which is the whole lesson: an optimisation
 					// measured on a broken foundation measures the foundation.
+					${ SSS ? wgslTagCode/* wgsl */`
 					var walkTransmittance = vec3f( 1.0 );
 					if ( inSubsurface ) {
 
@@ -512,6 +540,7 @@ export class MaterialKernel extends ComputeKernel {
 						}
 
 					}
+					` : '' }
 
 					let objectInfo = ${ transformsBuffer }[ u32( input.objectIndex ) ];
 					var materialInfo = ${ materialsBuffer }[ objectInfo.materialIndex ];
@@ -521,6 +550,7 @@ export class MaterialKernel extends ComputeKernel {
 					// Nothing to shade: the ray carries on straight, like an alpha pass through, and
 					// what changes is the stack of the media it travels in - this one entered from
 					// the front, left from the back (volume_stack_enter_exit).
+					${ MEDIUM ? wgslTagCode/* wgsl */`
 					if ( ( materialInfo.mediumFlags & 1u ) != 0u && input.isCurve == 0u ) {
 
 						if ( input.alphaDepth >= ${ MEDIUM_BOUNDS_MAX }u ) {
@@ -558,6 +588,7 @@ export class MaterialKernel extends ComputeKernel {
 						return;
 
 					}
+					` : '' }
 					// the emitter density of the TRIANGLE's material, read before a mix picks another
 					// branch: the table knows only the material the mesh wears. Curves are never in it
 					let emitterAreaPdf = select( materialInfo.emitterAreaPdf, 0.0, input.isCurve == 1u );
@@ -578,7 +609,7 @@ export class MaterialKernel extends ComputeKernel {
 					// trasformata, come un modificatore, quindi la posa dell'oggetto e' gia'
 					// dentro i suoi punti e non va riapplicata. Il costo dichiarato e' che
 					// muovere il volume vuole una ricottura.
-					let isCurve = input.isCurve == 1u;
+					${ HAIR ? 'let isCurve = input.isCurve == 1u;' : 'const isCurve = false;' }
 					var vertexData = ${ sampleTrianglePointFn }(
 						select( input.barycoord, vec3f( 0.0 ), isCurve ),
 						select( input.indices, vec3u( 0u ), isCurve ),
@@ -823,12 +854,14 @@ export class MaterialKernel extends ComputeKernel {
 					var throughputColor = input.throughputColor;
 					// what the medium absorbed on the way to this wall. One everywhere else, so
 					// the multiplication costs nothing when there is no volume.
+					${ SSS ? wgslTagCode/* wgsl */`
 					if ( inSubsurface ) {
 
 						throughputColor *= walkTransmittance;
 						rayDataStorage[ index ].throughputColor = throughputColor;
 
 					}
+					` : '' }
 					let isDispersive = materialInfo.dispersion > 0.0 && surface.ior > 1.0 && surface.transmission > 0.0 && ! surface.thinWall;
 					if ( isDispersive ) {
 
@@ -871,6 +904,7 @@ export class MaterialKernel extends ComputeKernel {
 					// fuori e assegnati dentro costano zero a chi non ha peluria — e servono
 					// in due punti (lo scatter e la NEE), che e' il motivo per cui non stanno
 					// semplicemente dentro un blocco.
+					${ HAIR ? wgslTagCode/* wgsl */`
 					var hairTangent = vec3f( 1.0, 0.0, 0.0 );
 					var hairFy = vec3f( 0.0, 1.0, 0.0 );
 					var hairFz = vec3f( 0.0, 0.0, 1.0 );
@@ -879,10 +913,12 @@ export class MaterialKernel extends ComputeKernel {
 					var hairAbsorption = vec3f( 0.0 );
 					var hairAlpha = 0.0;
 					var hairEta = 1.55;
+					${ HUANG ? wgslTagCode/* wgsl */`
 					var huang: ${ huangHairStruct };
 					var huangFrame = ${ huangBuildFrameFn }( vec3f( 1.0, 0.0, 0.0 ), vec3f( 0.0, 0.0, 1.0 ), vec3f( 0.0, 1.0, 0.0 ), 1.0 );
 					var huangRng = 1u;
-					let useHuang = isCurve && materialInfo.hairModel > 0.5;
+					` : '' }
+					${ HUANG ? 'let useHuang = isCurve && materialInfo.hairModel > 0.5;' : 'const useHuang = false;' }
 					if ( isCurve ) {
 
 						hairTangent = normalize( input.barycoord );
@@ -949,6 +985,7 @@ export class MaterialKernel extends ComputeKernel {
 						// di descrivere i lobi, e da li' vengono la sezione ELLITTICA e i
 						// glint. Il record e' suo, e il frame anche — il suo asse X si allinea
 						// all'asse maggiore dell'ellisse invece che alla vista.
+						${ HUANG ? wgslTagCode/* wgsl */`
 						if ( materialInfo.hairModel > 0.5 ) {
 
 							huang.sigma = hairAbsorption;
@@ -968,13 +1005,17 @@ export class MaterialKernel extends ComputeKernel {
 							huangRng = input.seed * 747796405u + input.pixelIndex * 2891336453u + input.currentBounce * 277803737u + 1u;
 
 						}
+						` : '' }
 
 					}
+					` : '' }
 
 					// sample the next bounce direction and stage the scatter state for LogicKernel
 					var scatterRec = ${ bsdfSampleFn }( view, surface );
+					${ HAIR ? wgslTagCode/* wgsl */`
 					if ( isCurve ) {
 
+						${ HUANG ? wgslTagCode/* wgsl */`
 						if ( useHuang && huangFrame.valid == 1u ) {
 
 							let hu = ${ huangSampleFn }( &${ params.ggxGlassTable }, huang, huangFrame, &huangRng );
@@ -987,7 +1028,7 @@ export class MaterialKernel extends ComputeKernel {
 							scatterRec.direction = hu.direction;
 							scatterRec.isTransmissive = false;
 
-						} else {
+						} else` : '' } {
 
 						let hairRand = ${ rand3 }( ${ RNG_INDEX_HAIR } );
 						let hs = ${ hairScatterFn }( hairAbsorption, hairVsm.x, hairVsm.y, hairVsm.z, hairAlpha, hairEta, hairTangent, hairFy, hairFz, hairH, view, hairRand );
@@ -1004,6 +1045,7 @@ export class MaterialKernel extends ComputeKernel {
 						}
 
 					}
+					` : '' }
 
 					// ── SUBSURFACE: go IN, and come back OUT ──
 					//
@@ -1020,10 +1062,13 @@ export class MaterialKernel extends ComputeKernel {
 					// basis and a second pair of random numbers.
 					// the medium of this surface's material, when it has one, as the stack names it: the
 					// record is the object's - the root of a Mix, whose leaves have no medium of their own
+					${ MEDIUM ? wgslTagCode/* wgsl */`
 					let ownMediumFlags = ${ materialsBuffer }[ objectInfo.materialIndex ].mediumFlags;
 					let ownMediumWord = ( objectInfo.materialIndex & 0xffffu ) | ( ( u32( input.objectIndex ) & 0xffffu ) << 16u );
 					let ownMediumCrossable = ( ownMediumFlags & 2u ) != 0u && input.isCurve == 0u && ! surface.thinWall;
+					` : '' }
 
+					${ SSS ? wgslTagCode/* wgsl */`
 					var insideNext = input.insideMaterial;
 					// a hit that goes in has PICKED the bssrdf closure, so the surface one is not
 					// there to be lit: see the NEE block at the bottom
@@ -1058,6 +1103,7 @@ export class MaterialKernel extends ComputeKernel {
 
 					}
 					rayDataStorage[ index ].insideMaterial = insideNext;
+					` : 'const enteredSubsurface = false;' }
 
 					// ── THE SURFACE WITH ITS VOLUME (shade_surface.h: volume_stack_enter_exit on a transmit) ──
 					//
@@ -1068,6 +1114,7 @@ export class MaterialKernel extends ComputeKernel {
 					// new one on the same side of the plane: the orientation of the hit normal does not
 					// enter it (with normal times side the exit was never seen, and a glass with its
 					// volume absorbed all the way to the wall behind it: 0.108 for an expected 0.607)
+					${ MEDIUM ? wgslTagCode/* wgsl */`
 					if ( ownMediumCrossable && ! inSubsurface && ! enteredSubsurface
 						&& dot( scatterRec.direction, input.normal ) * dot( input.direction, input.normal ) > 0.0 ) {
 
@@ -1078,6 +1125,7 @@ export class MaterialKernel extends ComputeKernel {
 						);
 
 					}
+					` : '' }
 
 					let newBounce = input.currentBounce + 1u;
 
@@ -1158,15 +1206,17 @@ export class MaterialKernel extends ComputeKernel {
 					if ( lightPdf > 0.0 ) {
 
 						var evalRec = ${ bsdfEvalPdfFn }( view, input.lightDirection, surface );
+						${ HAIR ? wgslTagCode/* wgsl */`
 						if ( isCurve ) {
 
+							${ HUANG ? wgslTagCode/* wgsl */`
 							if ( useHuang && huangFrame.valid == 1u ) {
 
 								let hu = ${ huangEvalFn }( &${ params.ggxGlassTable }, huang, huangFrame, input.lightDirection, &huangRng );
 								evalRec.color = hu;
 								evalRec.pdf = 1.0;
 
-							} else {
+							} else` : '' } {
 
 								let he = ${ hairEvalFn }( hairAbsorption, hairVsm.x, hairVsm.y, hairVsm.z, hairAlpha, hairEta, hairTangent, hairFy, hairFz, hairH, view, input.lightDirection );
 								evalRec.color = he.f;
@@ -1175,6 +1225,7 @@ export class MaterialKernel extends ComputeKernel {
 							}
 
 						}
+						` : '' }
 						if ( evalRec.pdf > 0.0 ) {
 
 							rayDataStorage[ index ].lightBsdf = evalRec.color;
@@ -1192,6 +1243,7 @@ export class MaterialKernel extends ComputeKernel {
 							// lights itself THROUGH its own medium (the light on the other side) starts the
 							// shadow across it, as Cycles does for a transmission NEE
 							var shadowStack = input.mediumStack;
+							${ MEDIUM ? wgslTagCode/* wgsl */`
 							if ( ownMediumCrossable && dot( input.lightDirection, input.normal ) * dot( input.direction, input.normal ) > 0.0 ) {
 
 								shadowStack = select(
@@ -1201,6 +1253,7 @@ export class MaterialKernel extends ComputeKernel {
 								);
 
 							}
+							` : '' }
 							shadowRayQueue[ shadowIndex ].mediumStack = shadowStack;
 							rayDataStorage[ index ].shadowRayIntersectionIndex = i32( shadowIndex );
 
@@ -1224,7 +1277,12 @@ export class MaterialKernel extends ComputeKernel {
 			}
 		`;
 
-		super( fn( params ) );
+		};
+
+		super( build( NO_KERNEL_FEATURES )( params ) );
+
+		this.featuresKey = kernelFeaturesKey( NO_KERNEL_FEATURES );
+		this._buildFn = features => build( features )( params );
 
 		this.defineUniformAccessors( params );
 		// the table node itself: the accessor above would swap its padded buffer, and the node

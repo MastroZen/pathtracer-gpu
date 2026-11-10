@@ -34,7 +34,14 @@ export class TraceShadowRayKernel extends ComputeKernel {
 	// none: then the interpreter is not compiled in at all, since every scene would pay its compile
 	// time for a feature it does not use. "shadowMixes" says whether one of them is the weights of a
 	// chain that lets light through - a wired Mix Shader Fac over a Transparent BSDF, the clouds
-	constructor( registers = 0, shadowMixes = false ) {
+	// "anyHit" builds the kernel of a scene where a shadow ray needs NO ORDER: no medium, whose boundaries
+	// are entered and left in sequence, and no chain whose weights a program computes at the crossing. Then
+	// one traversal answers: it stops at the first opaque triangle it finds, not the nearest, and gathers
+	// the tint of the alphas and the Transparent BSDFs it passes, a product whatever the order. The walk
+	// across boundaries below is not compiled in. LogicKernel reads whether something occludes and the
+	// transmittance, never the distance. The walk gave up after 16 crossings and called the light
+	// unoccluded: this one has no such limit
+	constructor( registers = 0, shadowMixes = false, anyHit = false ) {
 
 		const params = {
 			bvhData: { value: null },
@@ -55,6 +62,9 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 		const raycastOutput = proxy( 'bvhData.value.fns.raycastFirstHit.outputType', params );
 		const raycastFirstHitFn = proxy( 'bvhData.value.fns.raycastFirstHit', params );
+		const raycastShadowFn = proxy( 'bvhData.value.fns.raycastShadow', params );
+		// what the traversal gathered from the surfaces it passed (PathtracerBVHComputeData.js)
+		const shadowThrough = proxy( 'bvhData.value.shadowThrough', params );
 		// already bound by the raycast, which reads them for the alpha test: no new binding
 		const materialsBuffer = proxy( 'bvhData.value.storage.materials', params );
 		const transformsBuffer = proxy( 'bvhData.value.storage.transforms', params );
@@ -118,7 +128,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 		}
 
-		const fn = wgslTagFn /* wgsl */`
+		const walkFn = () => wgslTagFn /* wgsl */`
 
 			fn compute( maxMediumCrossings: u32, globalId: vec3u ) -> void {
 
@@ -238,11 +248,58 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 			}
 		`;
+		// -- ANY HIT: the whole kernel when nothing passes light --
+		const anyFn = () => wgslTagFn /* wgsl */`
 
-		super( fn( params ) );
+			fn compute( globalId: vec3u ) -> void {
+
+				let shadowRayIntersectionsStorage = &${ params.shadowRayIntersectionsStorage };
+
+				let index = globalId.x;
+				if ( index >= ${ params.queueCounters }[ ${ SHADOW_RAY_QUEUE_LENGTH }u ] ) {
+
+					return;
+
+				}
+
+				// read from the BUFFER, as in the walk below: see the note on WebKit there
+				let queuedRay = ${ params.shadowRayQueue }[ index ];
+				let indexUV = vec2u( queuedRay.pixelIndex >> 16, queuedRay.pixelIndex & 0xFFFF );
+				${ rngInit }( indexUV, queuedRay.seed, queuedRay.currentBounce + queuedRay.alphaDepth );
+
+				let ray = Ray( queuedRay.origin, queuedRay.direction, queuedRay.maxDist );
+				var hitResult: ${ raycastOutput };
+				var occluder = - 1;
+				if ( ${ raycastShadowFn }( ray, &hitResult ) ) {
+
+					occluder = i32( hitResult.objectIndex );
+
+				} else {
+
+					// no triangle on the way: only a hair can still be
+					let limit = select( 1e30, queuedRay.maxDist, queuedRay.maxDist > 0.0 );
+					let hair = ${ hairQueryFn }( &${ params.hairData }, queuedRay.origin, queuedRay.direction, limit );
+					if ( hair.didHit ) {
+
+						occluder = i32( ${ hairSegmentObjectFn }( &${ params.hairData }, hair.segment ) );
+
+					}
+
+				}
+
+				shadowRayIntersectionsStorage[ index ].objectIndex = occluder;
+				shadowRayIntersectionsStorage[ index ].dist = 0.0;
+				shadowRayIntersectionsStorage[ index ].barycoord = ${ shadowThrough };
+
+			}
+		`;
+
+
+		super( ( anyHit ? anyFn() : walkFn() )( params ) );
 
 		this.registers = registers;
 		this.shadowMixes = shadowMixes;
+		this.anyHit = anyHit;
 		this.defineUniformAccessors( params );
 
 	}

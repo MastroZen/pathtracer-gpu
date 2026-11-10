@@ -109,9 +109,19 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		// clear kernels
 		this.zeroDispatchKernel = new ZeroOutBufferKernel().setWorkgroupSize( 1, 1, 1 );
 
+		// the version of the surface function MaterialKernel compiled (PathtracerBVHComputeData.surfaceVersion)
+		this._surfaceVersion = 0;
+
 		// the segments through a HETEROGENEOUS medium, built the first time a scene has one and
 		// rebuilt with the register file its density programs need
 		this.volumeKernel = null;
+
+	}
+
+	// the size of the path slot pool: no frame budget dispatches more slots than this in one update
+	get maxPathsPerUpdate() {
+
+		return MAX_RAY_DATA_COUNT;
 
 	}
 
@@ -132,6 +142,8 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 		this.materialKernel.bvhData = bvhData;
 		this.materialKernel.needsUpdate = true;
+		// the surface function this kernel is about to compile is the one of these materials
+		this._surfaceVersion = bvhData.surfaceVersion;
 
 		this.svmKernel.bvhData = bvhData;
 		this.svmKernel.needsUpdate = true;
@@ -330,6 +342,20 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 	}
 
+	// THE KERNEL FEATURES of the scene (compute/wavefront/MaterialKernel.js): read at every iteration, since
+	// a material edited or a coat bound changes them without a new scene
+	_kernelFeatures() {
+
+		const bvhData = this.materialKernel.bvhData;
+		return {
+			hair: this.hasFur,
+			huang: ( bvhData?.huangMaterials ?? 0 ) > 0,
+			medium: ( bvhData?.mediumMaterials ?? 0 ) > 0,
+			subsurface: ( bvhData?.subsurfaceMaterials ?? 0 ) > 0,
+		};
+
+	}
+
 	// whether a shadow ray runs the weights of a chain it crosses: a wired Fac on a chain that lets light through
 	_shadowMixes() {
 
@@ -360,9 +386,14 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 		const registers = this._shadowRegisters();
 		const shadowMixes = this._shadowMixes();
-		if ( this.traceShadowRayKernel.registers !== registers || this.traceShadowRayKernel.shadowMixes !== shadowMixes ) {
+		// a shadow ray needs no order when the scene has no medium and no chain weighed at the crossing: then
+		// one traversal stops at the first opaque hit (TraceShadowRayKernel.js)
+		const bvhData = this.materialKernel.bvhData;
+		const anyHit = !! bvhData && bvhData.mediumMaterials === 0 && ! shadowMixes;
+		if ( this.traceShadowRayKernel.registers !== registers || this.traceShadowRayKernel.shadowMixes !== shadowMixes
+			|| this.traceShadowRayKernel.anyHit !== anyHit ) {
 
-			const kernel = new TraceShadowRayKernel( registers, shadowMixes ).setWorkgroupSize( 64, 1, 1 );
+			const kernel = new TraceShadowRayKernel( registers, shadowMixes, anyHit ).setWorkgroupSize( 64, 1, 1 );
 			kernel.context.random = this.traceShadowRayKernel.context.random;
 			kernel.bvhData = this.materialKernel.bvhData;
 			this.traceShadowRayKernel = kernel;
@@ -573,6 +604,20 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 			const iter = this.lowResMode ? Math.min( this.maxBounces, LOW_RES_ITERATIONS ) : 1;
 
 			for ( let i = 0; i < iter; i ++ ) {
+
+				// the kernels are generated for what the scene has: a feature that appeared or left
+				// rebuilds them here, before anything is dispatched
+				const features = this._kernelFeatures();
+				materialKernel.setFeatures( features );
+				logicKernel.setFeatures( features );
+				// and the surface function follows the texture slots the materials fill
+				const surfaceVersion = materialKernel.bvhData?.surfaceVersion ?? 0;
+				if ( this._surfaceVersion !== surfaceVersion ) {
+
+					materialKernel.needsUpdate = true;
+					this._surfaceVersion = surfaceVersion;
+
+				}
 
 				// Swap targets to support devices without <rgba32float, read_write> textures
 				// Copy latest data to a new outputTarget to keep the appearance
