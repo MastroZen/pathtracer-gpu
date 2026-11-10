@@ -677,8 +677,12 @@ export const getSurfaceRecordFunc = ( sampleTexel, getUvFromChannel, getColor, m
 		surf.iridescenceIor = material.iridescenceIor;
 		surf.iridescenceThickness = iridescenceThickness;
 
-		surf.specularColor = specularColor;
-		surf.specularIntensity = specularIntensity;
+		// "specularIntensity" past one scales the specular COLOR instead (F0 grows, the grazing value stays at one):
+		// the record holds twice the Specular IOR Level, and the KHR pair is read off it here. Up to one it is the
+		// KHR intensity as it always was. The tint stays apart, since the glass lobe takes it without the level
+		surf.specularTint = specularColor;
+		surf.specularColor = specularColor * max( specularIntensity, 1.0 );
+		surf.specularIntensity = min( specularIntensity, 1.0 );
 
 		surf.sheen = material.sheen;
 		surf.sheenColor = sheenColor;
@@ -830,15 +834,38 @@ export const specularBtdfFunc = wgslFn( /* wgsl */`
 		let Vis = G1_i * G1_o * abs( HdotV ) * abs( HdotL ) /
 			( abs( NdotV ) * abs( NdotL ) * denom * denom );
 
-		let F = dielectricFresnel( abs( HdotV ), eta );
-
+		// without the Fresnel: the caller weighs the refraction by the complement of the glass F
+		// (principledGlassFresnel), which a tint moves away from the plain dielectric curve
 		let D = ggxDistribution( H, alpha );
 
-		return vec3f( ( 1 - F ) * D * Vis );
+		return vec3f( D * Vis );
 
 	}
 
-`, [ ggxShadowMaskG1Func, ggxDistributionFunc, dielectricFresnelFunc ] );
+`, [ ggxShadowMaskG1Func, ggxDistributionFunc ] );
+
+// THE FRESNEL OF THE PRINCIPLED GLASS, with the behaviour of Cycles 5.2 (a generalized Schlick term with
+// a negative exponent): the tinted F0 rises to one ALONG THE REAL dielectric curve - the share of the
+// way from F0 to one the untinted Fresnel has covered at this angle - and the refraction takes the
+// complement of the same F, so a tint moves energy between reflection and refraction and never makes
+// or loses any. Total internal reflection drives the real curve, so the result, to one. The Specular
+// IOR Level does not enter: there it adjusts the dielectric layer of the opaque base only.
+// "eta" is the ratio as the surface record holds it; "tint" the specular tint
+export const principledGlassFresnelFunc = wgslFn( /* wgsl */ `
+
+	fn principledGlassFresnel( cosTheta: f32, eta: f32, tint: vec3f ) -> vec3f {
+
+		let fReal = dielectricFresnel( cosTheta, eta );
+		// squared by hand: iorToF0 goes through pow, which WGSL leaves undefined on a negative base - the
+		// inside of the glass (eta above one) - and the NaN killed those paths: white glass 8% dark in a furnace
+		let r = ( eta - 1.0 ) / ( eta + 1.0 );
+		let f0Real = r * r;
+		let s = saturate( ( fReal - f0Real ) / max( 1.0 - f0Real, 1e-6 ) );
+		return mix( min( f0Real * tint, vec3f( 1.0 ) ), vec3f( 1.0 ), s );
+
+	}
+
+`, [ dielectricFresnelFunc ] );
 
 // Effective roughness for thin walled transmission, from page 40 (note the slides' 3.7 is a typo for 3.4) -
 // referenced from Blender Cycles:
@@ -1140,10 +1167,10 @@ export const turquinIntegralFn = wgslTagFn/* wgsl */ `
 
 				}
 
-				// air-incident reflection is evaluated with schlick in bsdfEval - only the
-				// volume-incident ( TIR ) glass reflection uses the exact fresnel
+				// the opaque dielectric layer reflects with schlick in bsdfEval; the glass lobe with
+				// principledGlassFresnel, which is the exact curve at a white tint, on both sides
 				var reflectionF = f;
-				if ( eta < 1.0 ) {
+				if ( eta < 1.0 && ! includeRefraction ) {
 
 					reflectionF = ${ schlickFresnelFunc }( dot( wo, wh ), f0 );
 
@@ -1159,14 +1186,17 @@ export const turquinIntegralFn = wgslTagFn/* wgsl */ `
 
 				}
 
-				// refraction lobe - the btdf carries its own ( 1 - F ) fresnel weight, and
-				// samples landing back above the surface are lost
+				// refraction lobe, weighed by the complement of the exact fresnel as bsdfEval weighs
+				// it (the btdf carries none), and samples landing back above the surface are lost.
+				// A TABLE OF ENERGY READS THE LOBE IT COMPENSATES: when the ( 1 - F ) left the btdf
+				// for bsdfEval, a table still counting on it put white glass 8% under the sky
 				if ( includeRefraction ) {
 
 					let wiRefract = refract( - wo, wh, eta );
 					if ( wiRefract.z < 0.0 ) {
 
-						let transmission = ${ specularBtdfFunc }( wo, wiRefract, wh, vec2f( alpha ), eta );
+						let refractF = ${ dielectricFresnelFunc }( abs( dot( wo, wh ) ), eta );
+						let transmission = ( 1.0 - refractF ) * ${ specularBtdfFunc }( wo, wiRefract, wh, vec2f( alpha ), eta );
 						let pdf = ${ ggxRefractionAdjustedPDFFunc }( wo, wiRefract, wh, vec2f( alpha ), eta );
 						if ( pdf != 0.0 ) {
 

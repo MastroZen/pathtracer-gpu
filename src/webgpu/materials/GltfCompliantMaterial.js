@@ -1,7 +1,7 @@
 import { float } from 'three/tsl';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { PathtracingMaterial } from './PathtracingMaterial';
-import { specularBrdfFunc, specularBtdfFunc, fresnelMixFunc, conductorFresnelFunc, fresnelCoatFunc, iridescentFresnelFunc, isMatchedIorFunc, thinWallTransmissionRoughnessFunc } from '../nodes/material.wgsl.js';
+import { specularBrdfFunc, specularBtdfFunc, fresnelMixFunc, conductorFresnelFunc, fresnelCoatFunc, iridescentFresnelFunc, isMatchedIorFunc, thinWallTransmissionRoughnessFunc, principledGlassFresnelFunc } from '../nodes/material.wgsl.js';
 import { eonBrdfFunc, eonDirectionFunc, eonPDFFunc } from '../nodes/eon.wgsl.js';
 import { sheenColorFunc, sheenAlbedoScalingFunc } from '../nodes/sheen.wgsl.js';
 import { getLobeWeightsFunc } from '../nodes/sampling.wgsl.js';
@@ -145,12 +145,13 @@ export class GltfCompliantMaterial extends PathtracingMaterial {
 							let wiMirror = vec3f( ctx.L.xy, - ctx.L.z );
 							let thinWallAlpha = vec2f( ${ thinWallTransmissionRoughnessFunc }( alphaB, surf.ior ) );
 							let thinWallEnergySS = max( ${ this.turquinTexture.sampleConductorFn }( NdotV, sqrt( thinWallAlpha.x ) ), 1e-5 );
-							let F = ${ dielectricFresnelFunc }( saturate( ctx.VdotH ), surf.eta );
+							let F = ${ principledGlassFresnelFunc }( saturate( ctx.VdotH ), surf.eta, surf.specularTint );
 							refraction = ( 1.0 - F ) * ${ this.specularBrdf }( ctx.V, wiMirror, ctx.H, thinWallAlpha ) / thinWallEnergySS;
 
 						} else if ( ! matchedIor ) {
 
-							refraction = ${ this.specularBtdf }( ctx.V, ctx.L, ctx.H, alpha, surf.eta ) * glassBoost;
+							let F = ${ principledGlassFresnelFunc }( abs( dot( ctx.V, ctx.H ) ), surf.eta, surf.specularTint );
+							refraction = ( 1.0 - F ) * ${ this.specularBtdf }( ctx.V, ctx.L, ctx.H, alpha, surf.eta ) * glassBoost;
 
 						}
 
@@ -164,24 +165,10 @@ export class GltfCompliantMaterial extends PathtracingMaterial {
 						let specular = ${ this.specularBrdf }( ctx.V, ctx.L, ctx.H, alpha );
 						let dielectricSpecular = specular * glassBoost;
 
-						// KHR_materials_specular: fold the specular color and intensity into the dielectric f0
-						let dielectricF0 = min( surf.f0 * surf.specularColor, vec3f( 1.0 ) );
-
-						// air-incident hits use schlick so the tinted f0 applies - interior hits use
-						// the exact fresnel since schlick cannot represent TIR
-						// TODO: see if we can clean this up and make these branches more consistent
-						var dielectricFr: vec3f;
-						if ( airIncident ) {
-
-							dielectricFr = ${ schlickFresnelVecFunc }( ctx.VdotH, dielectricF0, vec3f( 1.0 ) );
-
-						} else {
-
-							dielectricFr = vec3f( ${ dielectricFresnelFunc }( abs( ctx.VdotH ), surf.eta ) );
-
-						}
-
-						var dielectricReflectance = surf.specularIntensity * dielectricFr;
+						// the same F on both sides, its complement weighing the refraction above: the tint
+						// moves energy between the two halves, total internal reflection takes it to one, and
+						// the IOR level stays out (principledGlassFresnel)
+						var dielectricReflectance = ${ principledGlassFresnelFunc }( ctx.VdotH, surf.eta, surf.specularTint );
 
 						// iridescence
 						if ( surf.iridescence > 0.0 ) {

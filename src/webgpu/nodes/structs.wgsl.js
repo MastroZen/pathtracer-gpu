@@ -407,6 +407,8 @@ export const surfaceRecordStruct = new StructTypeNode( {
 	// specular
 	specularColor: 'vec3f',
 	specularIntensity: 'f32',
+	// the specular tint alone, without the level: the glass lobe reads it (principledGlassFresnel)
+	specularTint: 'vec3f',
 }, 'SurfaceRecord' );
 
 export const environmentInfoStruct = new StructTypeNode( {
