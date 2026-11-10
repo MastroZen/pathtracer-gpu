@@ -4,7 +4,7 @@ import { ComputeKernel } from '../ComputeKernel.js';
 import { storage, globalId, uniform } from 'three/tsl';
 import { proxy, proxyFn, wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { rngInit } from '../../nodes/random.wgsl.js';
-import { traceQueuedRayStruct, intersectionResultStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
+import { traceQueuedRayStruct, shadowTraceResultStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
 import { hairQueryFn, hairSegmentObjectFn, EMPTY_HAIR_DATA } from '../../nodes/hair.wgsl.js';
 import { offsetRayOriginFunc } from '../../nodes/utils.wgsl.js';
 import { chainPassThroughFunc } from '../../nodes/material.wgsl.js';
@@ -48,7 +48,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 
 			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), traceQueuedRayStruct ),
 			queueCounters: storage( new StorageBufferAttribute( 1, 1 ), 'uint' ),
-			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
+			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), shadowTraceResultStruct ),
 
 			// lo stesso pacchetto del kernel di tracciamento: senza, i peli non si fanno
 			// ombra fra loro e una pelliccia diventa una nuvola uniforme — l'ombra
@@ -163,8 +163,6 @@ export class TraceShadowRayKernel extends ComputeKernel {
 				var stack = queuedRay.mediumStack;
 				var transmittance = vec3f( 1.0 );
 				var occluder = - 1;
-				var occluderDist = 0.0;
-				var travelled = 0.0;
 				var rng = queuedRay.seed * 747796405u + queuedRay.pixelIndex * 2891336453u
 					+ ( queuedRay.currentBounce * 128u + queuedRay.alphaDepth ) * 277803737u + 0x68e31da4u;
 				for ( var crossing = 0u; crossing < maxMediumCrossings; crossing ++ ) {
@@ -182,7 +180,6 @@ export class TraceShadowRayKernel extends ComputeKernel {
 					if ( hair.didHit ) {
 
 						occluder = i32( ${ hairSegmentObjectFn }( &${ params.hairData }, hair.segment ) );
-						occluderDist = travelled + hair.dist;
 						break;
 
 					}
@@ -214,7 +211,6 @@ export class TraceShadowRayKernel extends ComputeKernel {
 						if ( all( through <= vec3f( 0.0 ) ) ) {
 
 							occluder = i32( hitResult.objectIndex );
-							occluderDist = travelled + hitResult.dist;
 							break;
 
 						}
@@ -237,14 +233,12 @@ export class TraceShadowRayKernel extends ComputeKernel {
 					}
 
 					origin = ${ offsetRayOriginFunc }( origin + direction * hitResult.dist, direction, hitResult.normal.xyz );
-					travelled += hitResult.dist;
 					if ( bounded ) { remaining = max( remaining - hitResult.dist, 1e-6 ); }
 
 				}
 
 				shadowRayIntersectionsStorage[ index ].objectIndex = occluder;
-				shadowRayIntersectionsStorage[ index ].dist = occluderDist;
-				shadowRayIntersectionsStorage[ index ].barycoord = transmittance;
+				shadowRayIntersectionsStorage[ index ].transmittance = transmittance;
 
 			}
 		`;
@@ -288,8 +282,7 @@ export class TraceShadowRayKernel extends ComputeKernel {
 				}
 
 				shadowRayIntersectionsStorage[ index ].objectIndex = occluder;
-				shadowRayIntersectionsStorage[ index ].dist = 0.0;
-				shadowRayIntersectionsStorage[ index ].barycoord = ${ shadowThrough };
+				shadowRayIntersectionsStorage[ index ].transmittance = ${ shadowThrough };
 
 			}
 		`;

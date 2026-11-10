@@ -158,6 +158,17 @@ export const intersectionResultStruct = new StructTypeNode( {
 
 }, 'TraceResult' );
 
+// A shadow ray's answer, written by TraceShadowRayKernel at the ray's queue index and read by LogicKernel the
+// following frame: whether something occludes the light (objectIndex >= 0) and what the surfaces and media it
+// crossed let through. It was the bounce record, 64 bytes of which these two fields were read: 16 now, for two
+// records a path slot - 54 MB of pool down to 13, and a quarter of the traffic of every shadow pass
+export const shadowTraceResultStruct = new StructTypeNode( {
+
+	transmittance: 'vec3f',
+	objectIndex: 'int',
+
+}, 'ShadowTraceResult' );
+
 // The ray and shadow ray queues are plain arrays of queued rays, with their append-only lengths in a
 // separate counters buffer: since three r187 every storage buffer is bound as an array, which can't
 // hold a struct ending in a runtime-sized array.

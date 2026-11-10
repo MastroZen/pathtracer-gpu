@@ -19,7 +19,7 @@ import { ENVIRONMENT_LIGHT_TYPE, LIGHT_EPSILON, LIGHT_FAR_DISTANCE, isMISWeightL
 import { lightRecordStruct, scatterRecordStruct } from '../../nodes/structs.wgsl.js';
 import { mediumPhaseFn } from '../../nodes/mediumPhase.wgsl.js';
 import { mediumStackCoefficientsFunc, mediumStackFlagsFunc, mediumStackPhaseFunc, mediumStackPhaseWeightsFunc } from '../../nodes/mediumStack.wgsl.js';
-import { rayDataStruct, intersectionResultStruct, traceQueuedRayStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
+import { rayDataStruct, intersectionResultStruct, shadowTraceResultStruct, traceQueuedRayStruct, SHADOW_RAY_QUEUE_LENGTH } from './structs.js';
 import { NO_KERNEL_FEATURES, kernelFeaturesKey } from './kernelFeatures.js';
 import { SAMPLE_COUNT_MASK, SAMPLE_DISPATCHED_FLAG } from '../../constants.js';
 
@@ -78,7 +78,7 @@ export class LogicKernel extends ComputeKernel {
 
 			rayDataStorage: storage( new StorageBufferAttribute( 1, 1 ), rayDataStruct ),
 			rayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
-			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), intersectionResultStruct ),
+			shadowRayIntersectionsStorage: storage( new StorageBufferAttribute( 1, 1 ), shadowTraceResultStruct ),
 			// the seventh storage buffer: the direct light of a medium segment is queued from here
 			shadowRayQueue: storage( new StorageBufferAttribute( 1, 1 ), traceQueuedRayStruct ),
 			queueCounters: storage( new StorageBufferAttribute( 1, 1 ), 'uint' ).toAtomic(),
@@ -321,7 +321,7 @@ export class LogicKernel extends ComputeKernel {
 						// env + area lights are also bsdf-sampled, so MIS-weight them; punctual take full weight
 						let misWeight = select( 1.0, ${ misHeuristicFn }( input.lightPdf, input.lightBsdfPdf ), ${ isMISWeightLightFn }( input.lightType ) );
 						// times what the media it crossed let through, one without any
-						let directLight = throughputColor * input.lightEmission * input.lightBsdf * misWeight / input.lightPdf * shadowHit.barycoord;
+						let directLight = throughputColor * input.lightEmission * input.lightBsdf * misWeight / input.lightPdf * shadowHit.transmittance;
 						let contribution = ${ clampPathContributionFunc }( directLight, input.currentBounce, clampDirect, clampIndirect );
 						resultColor += vec4f( contribution, 0.0 );
 
@@ -337,7 +337,7 @@ export class LogicKernel extends ComputeKernel {
 					let mediumHit = ${ params.shadowRayIntersectionsStorage }[ u32( input.mediumShadowIndex ) ];
 					if ( mediumHit.objectIndex < 0 ) {
 
-						resultColor += vec4f( input.mediumDirect * mediumHit.barycoord, 0.0 );
+						resultColor += vec4f( input.mediumDirect * mediumHit.transmittance, 0.0 );
 
 					}
 

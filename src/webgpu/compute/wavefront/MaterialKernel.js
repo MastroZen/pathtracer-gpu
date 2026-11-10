@@ -1229,7 +1229,13 @@ export class MaterialKernel extends ComputeKernel {
 						if ( evalRec.pdf > 0.0 ) {
 
 							rayDataStorage[ index ].lightBsdf = evalRec.color;
-							rayDataStorage[ index ].lightBsdfPdf = evalRec.pdf;
+							// -- THE LAST BOUNCE: the light takes the whole weight --
+							//
+							// MIS splits a light between this sample and the bsdf ray that might find it, and at
+							// the bounce limit that ray is never traced: its share was lost. A zero bsdf pdf gives
+							// the light sample a weight of one, as the medium scatter above already does. Measured
+							// with an emitting ceiling and one bounce: the floor read 0.0015 for 0.5
+							rayDataStorage[ index ].lightBsdfPdf = select( evalRec.pdf, 0.0, newBounce >= maxBounces );
 
 							let shadowIndex = atomicAdd( &queueCounters[ ${ SHADOW_RAY_QUEUE_LENGTH }u ], 1u );
 							shadowRayQueue[ shadowIndex ].origin = ${ offsetRayOriginFunc }( vertexData.position.xyz, input.lightDirection, input.normal );

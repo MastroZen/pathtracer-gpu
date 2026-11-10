@@ -14,7 +14,7 @@ import { EquirectHdrInfoNode } from './EquirectHdrInfoNode.js';
 import { EquirectBackgroundInfo } from './EquirectBackgroundInfo.js';
 import { LightsInfoNode } from './LightsInfoNode.js';
 import {
-	rayDataStruct, traceQueuedRayStruct, intersectionResultStruct,
+	rayDataStruct, traceQueuedRayStruct, intersectionResultStruct, shadowTraceResultStruct,
 	RAY_QUEUE_LENGTH, SHADOW_RAY_QUEUE_LENGTH, QUEUE_COUNTER_COUNT, PIXEL_QUEUE_HEADER,
 } from './compute/wavefront/structs.js';
 import { PathTracerBackend } from './PathTracerBackend.js';
@@ -75,7 +75,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.rayIntersectionsStorage = new StorageBufferAttribute( MAX_RAY_DATA_COUNT, intersectionResultStruct.getLength() );
 		this.rayIntersectionsStorage.name = 'Ray Intersections';
 
-		this.shadowRayIntersectionsStorage = new StorageBufferAttribute( 2 * MAX_RAY_DATA_COUNT, intersectionResultStruct.getLength() );
+		this.shadowRayIntersectionsStorage = new StorageBufferAttribute( 2 * MAX_RAY_DATA_COUNT, shadowTraceResultStruct.getLength() );
 		this.shadowRayIntersectionsStorage.name = 'Shadow Ray Intersections';
 
 		// overflow pixel indices waiting for a free path slot, lazily sized to the resolution
@@ -321,6 +321,17 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 		this.lightsInfo.dispose();
 		if ( this.svmResults ) this.svmResults.dispose();
 
+		// and every kernel, so the renderer lets go of their pipelines and bindings
+		for ( const kernel of [
+			this.populatePixelIndicesKernel, this.logicKernel, this.materialKernel, this.svmKernel, this.traceRayKernel,
+			this.traceShadowRayKernel, this.rayDispatchConverter, this.shadowDispatchConverter, this.primeSampleCountersKernel,
+			this.tallySampleCountsKernel, this.zeroDispatchKernel, this.volumeKernel, this._featureResolveKernel,
+		] ) {
+
+			kernel?.dispose();
+
+		}
+
 	}
 
 	setFur( packed ) {
@@ -396,6 +407,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 			const kernel = new TraceShadowRayKernel( registers, shadowMixes, anyHit ).setWorkgroupSize( 64, 1, 1 );
 			kernel.context.random = this.traceShadowRayKernel.context.random;
 			kernel.bvhData = this.materialKernel.bvhData;
+			this.traceShadowRayKernel.dispose();
 			this.traceShadowRayKernel = kernel;
 
 		}
@@ -407,6 +419,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 
 		if ( ! this.volumeKernel || this.volumeKernel.registers !== registers ) {
 
+			this.volumeKernel?.dispose();
 			this.volumeKernel = new VolumeKernel( registers ).setWorkgroupSize( 64, 1, 1 );
 			this.volumeKernel.bvhData = this.materialKernel.bvhData;
 
@@ -423,6 +436,7 @@ export class WaveFrontPathTracer extends PathTracerBackend {
 			// generator as MaterialKernel, or its choice comes from another sequence
 			const kernel = new SvmKernel( registers );
 			kernel.context.random = this.materialKernel.context.random;
+			this.svmKernel.dispose();
 			this.svmKernel = kernel.setWorkgroupSize( 64, 1, 1 );
 			this.svmKernel.bvhData = this.materialKernel.bvhData;
 			if ( this.svmResults ) this.svmKernel.svmResults = this.svmResults;

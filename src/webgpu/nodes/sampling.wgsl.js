@@ -150,9 +150,23 @@ export const misHeuristicFn = wgslFn( /* wgsl */ `
 
 	fn misHeuristic( a: f32, b: f32 ) -> f32 {
 
-		let aa = a * a;
-		let bb = b * b;
-		return aa / ( aa + bb );
+		// as a RATIO of the two pdfs: squared, a delta-like pdf of 1e20 is infinity and inf / inf a NaN,
+		// one black pixel the denoiser smears. The larger pdf divides, so the ratio stays at most one.
+		// Two zero pdfs give zero: no strategy produced the sample
+		if ( a >= b ) {
+
+			if ( a <= 0.0 ) {
+
+				return 0.0;
+
+			}
+			let r = b / a;
+			return 1.0 / ( 1.0 + r * r );
+
+		}
+
+		let r = a / b;
+		return r * r / ( 1.0 + r * r );
 
 	}
 
