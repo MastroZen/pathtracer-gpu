@@ -870,6 +870,19 @@ export const principledGlassFresnelFunc = wgslFn( /* wgsl */ `
 // Effective roughness for thin walled transmission, from page 40 (note the slides' 3.7 is a typo for 3.4) -
 // referenced from Blender Cycles:
 // https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
+// The tint of one refraction through glass. A closed body is crossed twice, in and out, so each crossing takes
+// the square root of the base color and the pair gives it once: a red sphere at 0.5 lets half the light through,
+// where the whole color at each crossing gave a quarter. A thin wall is one event for both faces.
+export const transmissionTintFunc = wgslFn( /* wgsl */`
+
+	fn transmissionTint( color: vec3f, thinWall: bool ) -> vec3f {
+
+		return select( sqrt( max( color, vec3f( 0.0 ) ) ), color, thinWall );
+
+	}
+
+` );
+
 export const thinWallTransmissionRoughnessFunc = wgslFn( /* wgsl */ `
 
 	fn thinWallTransmissionRoughness( alpha: f32, eta: f32 ) -> f32 {

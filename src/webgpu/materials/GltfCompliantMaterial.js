@@ -1,7 +1,7 @@
 import { float } from 'three/tsl';
 import { wgslTagFn } from 'three-mesh-bvh/webgpu';
 import { PathtracingMaterial } from './PathtracingMaterial';
-import { specularBrdfFunc, specularBtdfFunc, fresnelMixFunc, conductorFresnelFunc, fresnelCoatFunc, iridescentFresnelFunc, isMatchedIorFunc, thinWallTransmissionRoughnessFunc, principledGlassFresnelFunc } from '../nodes/material.wgsl.js';
+import { specularBrdfFunc, specularBtdfFunc, fresnelMixFunc, conductorFresnelFunc, fresnelCoatFunc, iridescentFresnelFunc, isMatchedIorFunc, thinWallTransmissionRoughnessFunc, principledGlassFresnelFunc, transmissionTintFunc } from '../nodes/material.wgsl.js';
 import { eonBrdfFunc, eonDirectionFunc, eonPDFFunc } from '../nodes/eon.wgsl.js';
 import { sheenColorFunc, sheenAlbedoScalingFunc } from '../nodes/sheen.wgsl.js';
 import { getLobeWeightsFunc } from '../nodes/sampling.wgsl.js';
@@ -155,8 +155,10 @@ export class GltfCompliantMaterial extends PathtracingMaterial {
 
 						}
 
-						// the refracted half is not attenuated by the layers above
-						result += ( 1.0 - surf.metalness ) * surf.transmission * refraction * surf.color;
+						// the refracted half is not attenuated by the layers above. Each crossing of a closed glass
+						// takes the square root of the base color, so entering and leaving gives the color once; a thin
+						// wall stands for both faces in one event and takes it whole (transmissionTint)
+						result += ( 1.0 - surf.metalness ) * surf.transmission * refraction * ${ transmissionTintFunc }( surf.color, surf.thinWall );
 
 					} else {
 
@@ -441,7 +443,7 @@ export class GltfCompliantMaterial extends PathtracingMaterial {
 
 					// ScatterRecord stores f * abs(cos), so PBRT's unit delta BTDF reduces to
 					// the material transmission coefficient here.
-					result.color = ( 1.0 - surf.metalness ) * surf.transmission * surf.color;
+					result.color = ( 1.0 - surf.metalness ) * surf.transmission * ${ transmissionTintFunc }( surf.color, surf.thinWall );
 					result.direction = worldWi;
 					result.pdf = weights.transmission;
 					result.isTransmissive = dot( worldWi, surf.faceNormal ) < 0.0;
